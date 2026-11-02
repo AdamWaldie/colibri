@@ -33,6 +33,7 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import agent_connect  # noqa: E402
 import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
 import setup_flow  # noqa: E402
@@ -444,6 +445,52 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                ).pack(side="left", padx=6)
     ttk.Button(cb, text="Choose again (reconfigure)", command=lambda: (nb.select(t_model))).pack(side="right")
 
+    # Connect apps: coding tools pointed at the running server
+    t_apps = tab("Connect apps")
+    v_app_model = tk.StringVar(value="")
+    v_app_key = tk.StringVar(value="local")
+    v_app_folder = tk.StringVar(value=os.path.expanduser("~"))
+    apps_state = {"models": [], "found": {}}
+    head = ttk.Frame(t_apps)
+    head.pack(fill="x")
+    ttk.Label(head, text="Model").pack(side="left")
+    app_model = ttk.Combobox(head, textvariable=v_app_model, width=32)
+    app_model.pack(side="left", padx=(4, 12))
+    ttk.Label(head, text="API key").pack(side="left")
+    ttk.Entry(head, textvariable=v_app_key, width=14).pack(side="left", padx=(4, 12))
+    ttk.Button(head, text="Refresh", command=lambda: refresh_apps()).pack(side="left")
+    app_server = ttk.Label(head, text="", style="Hint.TLabel")
+    app_server.pack(side="left", padx=10)
+    body = ttk.PanedWindow(t_apps, orient="horizontal")
+    body.pack(fill="both", expand=True, pady=6)
+    app_list = ttk.Treeview(body, columns=("state",), show="tree headings", height=8, selectmode="browse")
+    app_list.heading("#0", text="App")
+    app_list.heading("state", text="On this PC")
+    app_list.column("#0", width=190)
+    app_list.column("state", width=110)
+    for entry in agent_connect.TOOLS:
+        app_list.insert("", "end", iid=entry["id"], text=entry["name"], values=("",))
+    body.add(app_list, weight=1)
+    right = ttk.Frame(body)
+    body.add(right, weight=3)
+    app_text = tk.Text(right, wrap="word", font=("Consolas", 9), height=12)
+    app_ysb = ttk.Scrollbar(right, orient="vertical", command=app_text.yview)
+    app_text.configure(yscrollcommand=app_ysb.set)
+    app_ysb.pack(side="right", fill="y")
+    app_text.pack(side="left", fill="both", expand=True)
+    foot = ttk.Frame(t_apps)
+    foot.pack(fill="x")
+    ttk.Label(foot, text="Project folder").pack(side="left")
+    ttk.Entry(foot, textvariable=v_app_folder).pack(side="left", fill="x", expand=True, padx=6)
+    ttk.Button(foot, text="Browse...", command=lambda: pick_dir(v_app_folder, "The project to open the app in")
+               ).pack(side="left")
+    b_app_open = ttk.Button(foot, text="Open in terminal", command=lambda: open_app())
+    b_app_open.pack(side="left", padx=(12, 4))
+    b_bridge = ttk.Button(foot, text="Start bridge", command=lambda: start_bridge())
+    b_bridge.pack(side="left")
+    ttk.Button(foot, text="Copy instructions", command=lambda: (
+        root.clipboard_clear(), root.clipboard_append(app_text.get("1.0", "end-1c")))).pack(side="left", padx=4)
+
     # Bottom: command, actions, output
     cmdbar = ttk.Frame(bottom)
     cmdbar.pack(fill="x", pady=(6, 2))
@@ -640,6 +687,70 @@ def main():  # pragma: no cover - the window itself is exercised by hand
 
         threading.Thread(target=work, daemon=True).start()
 
+    def app_conn():
+        found = dict(apps_state["models"])
+        model = v_app_model.get().strip() or None
+        return agent_connect.connection(state["cfg"], model=model, ctx=found.get(model),
+                                        key=v_app_key.get().strip() or "local")
+
+    def show_app(*_):
+        sel = app_list.selection()
+        tool_id = sel[0] if sel else "generic"
+        entry = agent_connect.tool(tool_id)
+        app_text.configure(state="normal")
+        app_text.delete("1.0", "end")
+        app_text.insert("1.0", agent_connect.instructions(tool_id, app_conn()))
+        app_text.configure(state="disabled")
+        can_open = entry["launch"] and sys.platform == "win32" and bool(apps_state["found"].get(tool_id))
+        b_app_open.configure(state="normal" if can_open else "disabled")
+        b_bridge.configure(state="normal" if entry.get("bridge") else "disabled")
+
+    app_list.bind("<<TreeviewSelect>>", show_app)
+    v_app_model.trace_add("write", show_app)
+    v_app_key.trace_add("write", show_app)
+
+    def refresh_apps():
+        conn = app_conn()
+        app_server.configure(text=f"asking {conn['base']} ...")
+
+        def work():
+            models = agent_connect.served_models(conn["base"], v_app_key.get().strip())
+            found = {e["id"]: agent_connect.find_exe(e) for e in agent_connect.TOOLS}
+            bridge = agent_connect.answers(conn["bridge"] + "/")
+            events.put(("apps", (conn["base"], models, found, bridge)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def open_app():
+        sel = app_list.selection()
+        if not sel:
+            return
+        tool_id = sel[0]
+        exe = apps_state["found"].get(tool_id)
+        conn = app_conn()
+        try:
+            if agent_connect.tool(tool_id).get("bridge"):
+                if agent_connect.start_bridge(conn, python=py):
+                    log_write(f"\nstarted the Codex bridge (coli ui) on {conn['bridge']}; "
+                              f"its log: {os.path.join(setup_flow.setup_home(), 'logs', 'bridge.log')}\n")
+            script = agent_connect.open_in_terminal(tool_id, conn, v_app_folder.get(), exe)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        log_write(f"\nopened {agent_connect.tool(tool_id)['name']} in a new window ({script})\n")
+
+    def start_bridge():
+        conn = app_conn()
+        try:
+            started = agent_connect.start_bridge(conn, python=py)
+        except OSError as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        log_write(f"\n> {display_command(agent_connect.bridge_command(conn, python=py))}\n"
+                  + ("started in the background" if started else f"already answering on {conn['bridge']}")
+                  + "\n")
+        root.after(3000, refresh_apps)
+
     def busy(on):
         for button in (b_apply, b_start, b_stop, b_status):
             button.configure(state="disabled" if on else "normal")
@@ -720,6 +831,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                     busy(False)
                     v_status.set("Finished." if payload == 0 else f"Stopped with code {payload}: see the output.")
                     load_current()
+                    refresh_apps()
                 elif kind == "hw":
                     hw, rows, drive_rows = payload
                     state["hw"], state["rows"] = hw, rows
@@ -735,6 +847,22 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                     on_select()
                     if v_status.get().startswith("Detecting"):
                         v_status.set("Hardware detected.")
+                elif kind == "apps":
+                    base, served, found, bridge = payload
+                    apps_state["models"], apps_state["found"] = served, found
+                    app_model.configure(values=[m for m, _ in served])
+                    if served and v_app_model.get() not in [m for m, _ in served]:
+                        v_app_model.set(served[0][0])
+                    app_server.configure(text=(f"server answering at {base}" if served else
+                                               f"no server at {base}: Start it, then Refresh")
+                                         + ("; bridge running" if bridge else ""))
+                    for entry in agent_connect.TOOLS:
+                        if entry["exe"]:
+                            text = "installed" if found.get(entry["id"]) else "not found"
+                        else:
+                            text = ""
+                        app_list.set(entry["id"], "state", text)
+                    show_app()
                 elif kind == "error":
                     v_status.set(payload)
                     log_write(payload + "\n")
@@ -755,6 +883,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand
     refresh_mode()
     load_current()
     detect()
+    app_list.selection_set("claude")
+    refresh_apps()
     poll()
     nb.select(t_cur if saved else t_model)
     root.mainloop()

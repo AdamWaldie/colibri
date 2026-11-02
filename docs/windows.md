@@ -32,6 +32,17 @@ setup in a window:
   whether to start the server afterwards.
 - **Current setup**: what `setup.json` holds, whether it is runnable, the
   server's state and URLs, and the server and install logs.
+- **Connect apps**: use the running model from a coding app, the way a local
+  Ollama is used. The model id and context come from the server's `/v1/models`.
+  Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in
+  a new terminal in a project folder already pointed at colibri: through
+  environment variables, or a CODEX_HOME / HERMES_HOME under the setup folder,
+  never by changing their own settings. Codex speaks only the Responses API,
+  so it goes through `coli ui` on port 8790 ("Start bridge"; started for you
+  when Codex is opened). Each app also shows the lines to paste for a permanent
+  setup, and T3 Code (which runs Codex or Claude Code) and any
+  OpenAI-compatible app (Continue, Cline, aider, crush, pi, OpenClaw, ...) get
+  the base URL, key and model to enter. See [api.md](api.md#connect-a-coding-cli-or-editor).
 
 **Install / Apply** runs `coli setup` with those choices, and Start, Stop and
 Status run `coli start`, `coli stop` and `coli status`; each command is shown
