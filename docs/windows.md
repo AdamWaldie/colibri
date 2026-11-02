@@ -19,39 +19,42 @@ directly. The same from a terminal: `py -3 c\coli setup`. See
 ### Or with a window: CONFIGURE.bat
 
 Double-click **`CONFIGURE.bat`** (or run `py -3 c\configurator.py`) for the same
-setup in a window:
+setup in a window. A strip at the top always shows whether colibri is running
+and which model, with **Open chat**, **Start** and **Stop**. Then four steps:
 
-- **Machine**: the CPU, RAM and GPU the setup sees, and the free space on every
-  fixed drive (double-click a drive to download models there).
-- **Model**: the catalog against this machine, what fits and why, with the
-  recommendation marked; or a model folder already on disk.
-- **Locations**: the models folder (with the space the chosen model needs), the
-  extra shard folders of a model split across drives, a Hugging Face token for
-  gated repositories (passed to that run only, never saved).
-- **Run**: backend (automatic, CUDA, Vulkan, CPU), address, port, context, and
-  whether to start the server afterwards.
-- **Current setup**: what `setup.json` holds, whether it is runnable, the
-  server's state and URLs, and the server and install logs.
-- **Connect apps**: use the running model from a coding app, the way a local
-  Ollama is used. The model id and context come from the server's `/v1/models`.
-  Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in
-  a new terminal in a project folder already pointed at colibri: through
-  environment variables, or a CODEX_HOME / HERMES_HOME under the setup folder,
-  never by changing their own settings. Codex speaks only the Responses API,
-  so it goes through `coli ui` on port 8790 ("Start bridge"; started for you
-  when Codex is opened). Each app also shows the lines to paste for a permanent
-  setup, and T3 Code (which runs Codex or Claude Code) and any
-  OpenAI-compatible app (Continue, Cline, aider, crush, pi, OpenClaw, ...) get
-  the base URL, key and model to enter. See [api.md](api.md#connect-a-coding-cli-or-editor).
+1. **Model**: the catalog checked against this PC's RAM and disk, in plain words
+   (runs well, tight on RAM, needs more RAM), the recommendation first; or a
+   model folder already on disk.
+2. **Location**: the drives and their free space (double-click one), the models
+   folder with the space the chosen model needs, and, only if needed, a Hugging
+   Face token (used for that install, never saved) and extra shard folders.
+3. **Options**: CUDA, Vulkan, CPU or automatic; context, port and address;
+   whether to start the server afterwards.
+4. **Install**: what will happen, in words, with any warning (not enough
+   space, too little RAM, a licence, a network address) before it starts. A
+   progress bar shows the phase, the gigabytes downloaded, the speed and the
+   time left. Cancel, or close the window, at any point: Install again continues
+   where it stopped.
 
-**Install / Apply** runs `coli setup` with those choices, and Start, Stop and
-Status run `coli start`, `coli stop` and `coli status`; each command is shown
-(and can be copied) before it runs, and its output appears in the window. The
-window keeps no settings of its own: `setup.json` stays the one configuration,
-so START-HERE.bat, `coli start` and the window always agree. A download can be
-cancelled or the window closed at any point: Install / Apply continues where it
-stopped. The window needs Tk, which the python.org installer includes ("tcl/tk
-and IDLE").
+**Connect apps** uses the running model from a coding app, the way a local
+Ollama is used. The model id and context come from the server's `/v1/models`.
+Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a
+new terminal in a project folder already pointed at colibri: through environment
+variables, or a CODEX_HOME / HERMES_HOME under the setup folder, never by changing
+their own settings. Codex speaks only the Responses API, so it goes through
+`coli ui` on port 8790 (started for you). Each app also shows the lines to paste
+for a permanent setup; T3 Code (which runs Codex or Claude Code) and any
+OpenAI-compatible app (Continue, Cline, aider, crush, pi, OpenClaw, ...) get the
+base URL, key and model to enter. See [api.md](api.md#connect-a-coding-cli-or-editor).
+
+**This PC** shows the hardware report and where colibri keeps its files;
+**Details** the saved `setup.json`, the server and install logs.
+
+Every button runs the real launcher (`coli setup`, `coli start`, `coli stop`,
+`coli status`): the command is shown under "Same as typing", and its output under
+**Show output**, which opens by itself when something fails. The window keeps no
+settings of its own, so START-HERE.bat, `coli start` and the window always agree.
+It needs Tk, which the python.org installer includes ("tcl/tk and IDLE").
 
 ## If you downloaded a release archive, start here
 

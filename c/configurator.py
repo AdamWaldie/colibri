@@ -6,27 +6,37 @@ fetch the engine, download with resume, write setup.json). This is a graphical
 front end to it, made for Windows: double-click CONFIGURE.bat at the top of the
 folder, or run `py -3 c\\configurator.py`.
 
-    Machine        what the setup sees: CPU, RAM, GPU, the free space on each drive
-    Model          the catalog against this machine (what fits and why), or a
+    status strip   is the server running, which model, Open chat / Start / Stop
+    1 Model        the catalog against this machine (what fits and why), or a
                    model folder that is already on disk
-    Locations      where models are downloaded, extra shard folders for a model
-                   split across drives, the Hugging Face token for gated models
-    Run            backend (auto / CPU / Vulkan / CUDA), address, port, context
-    Current setup  the saved run configuration (setup.json) and the server's state
+    2 Location     where models are downloaded (the drives and their free space),
+                   extra shard folders, a Hugging Face token for gated models
+    3 Options      backend (auto / CUDA / Vulkan / CPU), address, port, context
+    4 Install      what will happen, in words, then `coli setup` with a progress bar
+    Connect apps   Claude Code, Codex, opencode, Hermes, T3 Code and any
+                   OpenAI-compatible app pointed at the running model
+    This PC        the hardware report and where colibri keeps its files
+    Details        the saved run configuration (setup.json) and the logs
 
 Every action runs the real launcher (`coli setup ...`, `coli start`, `coli stop`,
-`coli status`, `coli logs`) and shows its output, and the command is shown
-before it runs, so whatever the window does can also be typed in a terminal.
-The window keeps no settings of its own: setup.json, written by `coli setup`,
-stays the only configuration. The token is passed to the child process only,
-never saved.
+`coli status`, `coli logs`); the command is shown and its output kept under
+"Output", so whatever the window does can also be typed in a terminal. The window
+keeps no settings of its own: setup.json, written by `coli setup`, stays the only
+configuration. The token is passed to the child process only, never saved.
+
+Under pythonw.exe there is no console: everything that starts a console program
+(the hardware probes, the launcher) runs in a child without a window, so nothing
+flashes on screen.
 """
+import json
 import os
 import queue
 import shutil
 import subprocess
 import sys
 import threading
+import time
+import traceback
 import webbrowser
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -41,7 +51,20 @@ import setup_hw  # noqa: E402
 
 GB = setup_catalog.GB
 BACKENDS = ("auto", "cpu", "vulkan", "cuda")
+BACKEND_WORDS = {"auto": "automatic (CUDA if it builds for the card, else Vulkan, else the CPU)",
+                 "cuda": "NVIDIA CUDA", "vulkan": "Vulkan (any GPU with a Vulkan driver)", "cpu": "the CPU only"}
 COLI = os.path.join(HERE, "coli")
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+
+FIT_WORDS = {"good": "Runs well", "tight": "Runs, tight on RAM", "needs-ram": "Needs more RAM",
+             "needs-disk": "Needs more disk", "unsupported": "Not for this PC"}
+PHASE_WORDS = {"starting": "Checking this PC", "build": "Building the engine",
+               "download": "Downloading the model", "ready": "Set up", "started": "Started",
+               "error": "Stopped with an error", "interrupted": "Interrupted"}
+INSTALL_HINTS = {"claude": "npm install -g @anthropic-ai/claude-code",
+                 "codex": "npm install -g @openai/codex",
+                 "opencode": "npm install -g opencode-ai",
+                 "hermes": "see Hermes Agent's install guide"}
 
 
 # ---------------------------------------------------------------- pure logic (tested)
@@ -119,9 +142,9 @@ def setup_command(options, python="python", coli=COLI):
 
 
 def child_env(extra=None, base=None):
-    """The environment for a launcher run: unbuffered UTF-8 output (the log pane
-    shows it live) without colour codes, plus the window's extra variables (the
-    token, the extra shard folders)."""
+    """The environment for a launcher run: unbuffered UTF-8 output (the window shows
+    it live) without colour codes, plus the window's extra variables (the token,
+    the extra shard folders)."""
     env = dict(os.environ if base is None else base)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
@@ -148,8 +171,8 @@ def display_command(cmd, extra=None, windows=None):
     """The command as a person would type it (`coli ...`), the token hidden."""
     windows = sys.platform == "win32" if windows is None else windows
     shown = list(cmd)
-    if len(shown) >= 2 and os.path.basename(shown[1]) == "coli":
-        shown = ["coli"] + shown[2:]
+    if len(shown) >= 2 and os.path.basename(shown[1]) in ("coli", "setup_hw.py"):
+        shown = (["coli"] if os.path.basename(shown[1]) == "coli" else ["python", shown[1]]) + shown[2:]
     if windows:
         text = subprocess.list2cmdline(shown)
     else:
@@ -160,6 +183,18 @@ def display_command(cmd, extra=None, windows=None):
         value = "<hidden>" if key == "HF_TOKEN" else value
         prefix += f'set "{key}={value}" && ' if windows else f"{key}={value} "
     return prefix + text
+
+
+def detect_command(target, python="python"):
+    """The hardware report as JSON, from a child process: on Windows the probes start
+    PowerShell and nvidia-smi, which would each flash a console window if started
+    from the window's own console-less process."""
+    return [python, os.path.join(HERE, "setup_hw.py"), target, "--json"]
+
+
+def kill_tree_command(pid):
+    """Cancel on Windows: the launcher and everything it started (make, curl)."""
+    return ["taskkill", "/PID", str(int(pid)), "/T", "/F"]
 
 
 def catalog_rows(ram_total, free_bytes, downloaded=None, os_name=None, machine=None):
@@ -194,24 +229,108 @@ def space_note(entry, free):
     return f"{entry.name} needs {setup_hw.fmt_gb(need)}: NOT ENOUGH SPACE, choose another drive"
 
 
-def drive_report():
-    """(root, free bytes, total bytes) for every place a model could go: the fixed
-    drives on Windows, the home folder elsewhere."""
-    roots = setup_hw.windows_fixed_drives() or [os.path.expanduser("~")]
-    out = []
-    for root in roots:
+def fit_words(status):
+    return FIT_WORDS.get(status, status)
+
+
+def progress_from_state(state, now=None):
+    """install-state.json as (fraction or None for 'busy', one line of text)."""
+    if not state:
+        return None, "Working..."
+    phase = state.get("phase") or ""
+    words = PHASE_WORDS.get(phase, phase.capitalize() or "Working")
+    if phase == "download" and state.get("total"):
+        done, total = state.get("done") or 0, state["total"]
+        text = f"{words}: {setup_hw.fmt_gb(done)} of {setup_hw.fmt_gb(total)}"
+        if state.get("rate"):
+            text += f"  ({setup_download.human_rate(state['rate'])})"
+        eta = state.get("eta_seconds")
+        if eta:
+            text += "  about " + (f"{eta / 3600:.1f} h" if eta >= 3600 else
+                                  f"{max(1, round(eta / 60))} min") + " left"
+        return min(1.0, done / total), text
+    if phase == "error" and state.get("message"):
+        return None, f"{words}: {state['message'].splitlines()[0]}"
+    return None, words + "..."
+
+
+def plan_lines(options, row=None, free=None):
+    """What Install will do, in words, and the warnings to read first:
+    ([lines], [warnings]). row is the model table's row for the chosen model."""
+    lines, warnings = [], []
+    model_dir = (options.get("model_dir") or "").strip()
+    if model_dir:
+        lines.append(f"Use the model already in {model_dir} (nothing to download).")
+    elif row:
+        folder = os.path.join(options.get("models_root") or setup_flow.default_models_root(), row["id"])
+        lines.append(f"Download {row['name']}: {row['download_gb']:.0f} GB into {folder}.")
+        lines.append("   The download resumes where it stopped if it is interrupted or cancelled.")
+        if not row["fits"]:
+            warnings.append(f"{row['name']}: {row['reason']}.")
+        if row.get("license_note"):
+            warnings.append(f"{row['name']}: {row['license_note']}.")
+        entry = None
         try:
-            usage = shutil.disk_usage(root)
-            out.append((root, usage.free, usage.total))
-        except OSError:
-            continue
-    return out
+            entry = setup_catalog.by_id(row["id"])
+        except KeyError:
+            pass
+        note = space_note(entry, free)
+        if "NOT ENOUGH" in note:
+            warnings.append(note + " (step 2).")
+    else:
+        warnings.append("Choose a model first (step 1).")
+    lines.append(f"Get the engine for {BACKEND_WORDS.get(options.get('backend') or 'auto', '?')}: "
+                 "the prebuilt one, or built on this PC when a compiler is installed.")
+    host = (options.get("host") or setup_flow.DEFAULT_HOST).strip()
+    port = str(options.get("port") or setup_flow.DEFAULT_PORT).strip()
+    ctx = str(options.get("ctx") or "0").strip()
+    lines.append(f"Serve it at {setup_flow.urls(host, port)['browser']} with "
+                 + ("an automatic context." if ctx in ("", "0") else f"a {ctx}-token context."))
+    if host in ("0.0.0.0", "::"):
+        warnings.append("Address 0.0.0.0 makes the server reachable from other computers on the "
+                        "network; start it with COLI_API_KEY set to require a key.")
+    if options.get("start", "background") == "background":
+        lines.append("Then start the server in the background"
+                     + ("." if options.get("no_browser") else " and open the chat in the browser."))
+    else:
+        lines.append("Then stop: start it later with Start at the top.")
+    return lines, warnings
+
+
+def server_words(server, cfg):
+    """The status strip: (colour, text) for the server state."""
+    if not cfg:
+        return "grey", "Not set up yet: choose a model, then Install (steps 1 to 4)"
+    name = (cfg.get("model") or {}).get("name") or "the model"
+    if cfg.get("status") != "ready":
+        return "orange", f"{name}: setup not finished. Install continues where it stopped"
+    state = (server or {}).get("state")
+    if state == "ready":
+        speed = server.get("tokens_per_second")
+        return "green", f"Running: {name}" + (f"  ({speed} tok/s last answer)" if speed else "")
+    if state == "loading":
+        return "orange", f"Loading {name}... (large models take minutes)"
+    return "grey", f"Stopped: {name} is set up. Press Start"
+
+
+def open_reason(entry, exe, platform, served):
+    """'' when the app can be opened from the window, else why not, in words."""
+    if not entry["launch"]:
+        return "Follow the instructions on the right for this app."
+    if platform != "win32":
+        return "Opening a terminal is for Windows; use the commands on the right."
+    if not exe:
+        hint = INSTALL_HINTS.get(entry["id"])
+        return f"{entry['name']} is not installed (or not on PATH)" + (f": {hint}" if hint else ".")
+    if not served:
+        return "Start the server first (Start, at the top), then Refresh."
+    return ""
 
 
 def config_summary(cfg):
     """The saved run configuration as (label, value) lines."""
     if not cfg:
-        return [("status", "not set up yet: choose a model, then Install / Apply")]
+        return [("status", "not set up yet: choose a model, then Install")]
     model = cfg.get("model") or {}
     backend = cfg.get("backend") or cfg.get("requested_backend") or "?"
     asked = cfg.get("requested_backend")
@@ -234,7 +353,7 @@ def config_summary(cfg):
         lines.append(("failed builds", ", ".join(cfg["failed_builds"])))
     if cfg.get("gpu_pending"):
         lines.append(("GPU pending", ", ".join(cfg["gpu_pending"])
-                      + "  (install the GPU packages, then Install / Apply again)"))
+                      + "  (install the GPU packages, then Install again)"))
     if cfg.get("updated"):
         lines.append(("saved", cfg["updated"]))
     return lines
@@ -244,17 +363,63 @@ def split_name_for(family_id):
     return setup_flow.split_dirs_name(family_id) if family_id else ""
 
 
+def drive_report():
+    """(root, free bytes, total bytes) for every place a model could go: the fixed
+    drives on Windows, the home folder elsewhere."""
+    roots = setup_hw.windows_fixed_drives() or [os.path.expanduser("~")]
+    out = []
+    for root in roots:
+        try:
+            usage = shutil.disk_usage(root)
+            out.append((root, usage.free, usage.total))
+        except OSError:
+            continue
+    return out
+
+
 # ---------------------------------------------------------------- the window
 
 
-def main():  # pragma: no cover - the window itself is exercised by hand
+def _no_console_streams():
+    """pythonw.exe gives no stdout/stderr: a stray print would raise. Errors go to a
+    log in the setup folder instead."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        try:
+            path = setup_flow.log_path("configurator")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            sys.stderr = open(path, "a", encoding="utf-8")
+        except OSError:
+            sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
+def _dpi_aware():
+    """Sharp text on a scaled Windows display, instead of a blurry bitmap stretch."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except (AttributeError, OSError):
+            ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+def main():  # pragma: no cover - the window itself is exercised by hand and by screenshots
+    _no_console_streams()
+    _dpi_aware()
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
     root = tk.Tk()
-    root.title("colibri configurator")
-    root.geometry("1060x740")
-    root.minsize(880, 620)
+    root.title("colibri")
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    width, height = min(1100, sw - 60), min(780, sh - 80)
+    root.geometry(f"{width}x{height}+{max(0, (sw - width) // 2)}+{max(0, (sh - height) // 3)}")
+    root.minsize(min(860, width), min(600, height))
     icon = os.path.join(HERE, "..", "desktop", "src-tauri", "icons", "icon.ico")
     if sys.platform == "win32" and os.path.isfile(icon):
         try:
@@ -264,13 +429,26 @@ def main():  # pragma: no cover - the window itself is exercised by hand
     style = ttk.Style(root)
     if "vista" in style.theme_names():
         style.theme_use("vista")
-    style.configure("Head.TLabel", font=("Segoe UI", 11, "bold"))
-    style.configure("Hint.TLabel", foreground="#666666")
+    base_font = ("Segoe UI", 10) if sys.platform == "win32" else ("TkDefaultFont", 10)
+    style.configure("Head.TLabel", font=(base_font[0], 12, "bold"))
+    style.configure("Status.TLabel", font=(base_font[0], 11, "bold"))
+    style.configure("Hint.TLabel", foreground="#5f6368")
+    style.configure("Warn.TLabel", foreground="#b00020")
+    style.configure("Big.TButton", font=(base_font[0], 11, "bold"), padding=(18, 8))
+
+    def report_error(exc, value, tb):
+        text = "".join(traceback.format_exception(exc, value, tb))
+        print(text, file=sys.stderr, flush=True)
+        messagebox.showerror("colibri", f"Something went wrong:\n\n{value}\n\nDetails: "
+                                        f"{setup_flow.log_path('configurator')}")
+
+    root.report_callback_exception = report_error
 
     saved = setup_flow.load_config() or {}
     saved_model = (saved.get("model") or {}).get("id") or ""
     saved_local = bool(saved.get("model_dir")) and not saved_model
-    state = {"hw": None, "rows": [], "proc": None, "cfg": saved}
+    state = {"hw": None, "rows": [], "proc": None, "proc_kind": "", "cfg": saved, "server": None,
+             "ready": False, "drives": [], "apps_models": [], "apps_found": {}, "closing": False}
     events = queue.Queue()
     py = python_for_children()
 
@@ -289,191 +467,234 @@ def main():  # pragma: no cover - the window itself is exercised by hand
     v_no_verify = tk.BooleanVar(value=False)
     v_show_all = tk.BooleanVar(value=False)
     v_token = tk.StringVar(value="")
-    split_saved = ""
     family = saved.get("family")
-    if family and split_name_for(family):
-        split_saved = (saved.get("env") or {}).get(split_name_for(family), "")
-    v_split = tk.StringVar(value=split_saved)
-    v_status = tk.StringVar(value="Ready.")
+    v_split = tk.StringVar(value=(saved.get("env") or {}).get(split_name_for(family), "") if family else "")
+    v_status = tk.StringVar(value="")
     v_cmd = tk.StringVar(value="")
+    v_server = tk.StringVar(value="")
 
-    # ---- layout: tabs on top; command line, buttons and the output below
-    paned = ttk.PanedWindow(root, orient="vertical")
-    paned.pack(fill="both", expand=True, padx=8, pady=(8, 0))
-    nb = ttk.Notebook(paned)
-    paned.add(nb, weight=3)
-    bottom = ttk.Frame(paned)
-    paned.add(bottom, weight=2)
+    # ---- status strip
+    strip = ttk.Frame(root, padding=(12, 10, 12, 6))
+    strip.pack(fill="x")
+    dot = tk.Canvas(strip, width=16, height=16, highlightthickness=0, bg=root.cget("bg"))
+    dot_id = dot.create_oval(2, 2, 14, 14, fill="grey", outline="")
+    dot.pack(side="left")
+    ttk.Label(strip, textvariable=v_server, style="Status.TLabel").pack(side="left", padx=8)
+    b_stop = ttk.Button(strip, text="Stop", command=lambda: run_coli(["stop"], "stop"))
+    b_stop.pack(side="right")
+    b_start = ttk.Button(strip, text="Start", command=lambda: run_coli(
+        ["start", "--background"] + (["--no-browser"] if v_no_browser.get() else []), "start"))
+    b_start.pack(side="right", padx=4)
+    b_chat = ttk.Button(strip, text="Open chat", command=lambda: open_dashboard())
+    b_chat.pack(side="right")
+    ttk.Separator(root).pack(fill="x")
+
+    # ---- bottom: progress, status, output (packed before the tabs so it keeps its room)
+    bottom = ttk.Frame(root, padding=(12, 6, 12, 8))
+    bottom.pack(fill="x", side="bottom")
+    bar_row = ttk.Frame(bottom)
+    bar_row.pack(fill="x")
+    progress = ttk.Progressbar(bar_row, mode="determinate", maximum=1000, length=240)
+    progress.pack(side="left")
+    ttk.Label(bar_row, textvariable=v_status).pack(side="left", padx=10, fill="x", expand=True)
+    b_toggle = ttk.Button(bar_row, text="Show output", command=lambda: toggle_output())
+    b_toggle.pack(side="right")
+    b_cancel = ttk.Button(bar_row, text="Cancel", command=lambda: cancel(), state="disabled")
+    b_cancel.pack(side="right", padx=4)
+    out_frame = ttk.Frame(bottom)
+    log = tk.Text(out_frame, height=12, wrap="none", font=("Consolas", 9), background="#111111",
+                  foreground="#dddddd", insertbackground="#dddddd")
+    log_y = ttk.Scrollbar(out_frame, orient="vertical", command=log.yview)
+    log.configure(yscrollcommand=log_y.set)
+    log_y.pack(side="right", fill="y")
+    log.pack(side="left", fill="both", expand=True)
+    out_tools = ttk.Frame(bottom)
+    ttk.Button(out_tools, text="Clear", command=lambda: log.delete("1.0", "end")).pack(side="right")
+    ttk.Button(out_tools, text="Copy all", command=lambda: (
+        root.clipboard_clear(), root.clipboard_append(log.get("1.0", "end-1c")))).pack(side="right", padx=4)
+
+    # ---- tabs
+    nb = ttk.Notebook(root)
+    nb.pack(fill="both", expand=True, padx=12, pady=(8, 0))
 
     def tab(title):
-        frame = ttk.Frame(nb, padding=10)
+        frame = ttk.Frame(nb, padding=12)
         nb.add(frame, text=title)
         return frame
 
-    def form_row(parent, r, label, var, browse=None, show="", hint=""):
+    def form_row(parent, r, label, var, browse=None, show="", hint="", width=None):
         ttk.Label(parent, text=label).grid(row=r, column=0, sticky="w", pady=4)
-        entry = ttk.Entry(parent, textvariable=var, show=show)
-        entry.grid(row=r, column=1, sticky="ew", padx=6)
+        entry = ttk.Entry(parent, textvariable=var, show=show, width=width or 0)
+        entry.grid(row=r, column=1, sticky="w" if width else "ew", padx=6)
         if browse:
             ttk.Button(parent, text="Browse...", command=browse).grid(row=r, column=2)
         if hint:
-            ttk.Label(parent, text=hint, style="Hint.TLabel", wraplength=780,
-                      justify="left").grid(row=r + 1, column=1, sticky="w", padx=6)
+            ttk.Label(parent, text=hint, style="Hint.TLabel", wraplength=760,
+                      justify="left").grid(row=r + 1, column=1, columnspan=2, sticky="w", padx=6)
         return entry
 
-    # Machine
-    t_machine = tab("Machine")
-    ttk.Label(t_machine, text="What the setup sees on this computer", style="Head.TLabel").pack(anchor="w")
-    hw_text = tk.Text(t_machine, height=9, wrap="word", font=("Consolas", 10), relief="flat")
-    hw_text.pack(fill="x", pady=(6, 10))
-    hw_text.insert("1.0", "Detecting the hardware (the GPU probe takes a few seconds)...")
-    hw_text.configure(state="disabled")
-    ttk.Label(t_machine, text="Drives", style="Head.TLabel").pack(anchor="w")
-    drives = ttk.Treeview(t_machine, columns=("free", "total"), height=5)
-    drives.heading("#0", text="Drive")
-    drives.heading("free", text="Free")
-    drives.heading("total", text="Size")
-    drives.pack(fill="x", pady=4)
-    ttk.Label(t_machine, style="Hint.TLabel", wraplength=900, justify="left",
-              text="Large models stream their experts from the disk while answering: put them on "
-                   "the fastest local NVMe drive, never a network or USB drive. Double-click a "
-                   "drive to download models there.").pack(anchor="w")
-    ttk.Button(t_machine, text="Detect again", command=lambda: detect()).pack(anchor="w", pady=6)
+    def next_button(parent, label, target):
+        ttk.Button(parent, text=label, command=lambda: nb.select(target)).pack(side="right")
 
-    # Model
-    t_model = tab("Model")
+    # 1 Model
+    t_model = tab(" 1  Model ")
     top = ttk.Frame(t_model)
     top.pack(fill="x")
-    ttk.Radiobutton(top, text="Download a model from the catalog", variable=v_use_local,
-                    value=False, command=lambda: refresh_mode()).pack(side="left")
-    ttk.Checkbutton(top, text="also show models that do not fit this machine", variable=v_show_all,
+    ttk.Label(top, text="Choose a model", style="Head.TLabel").pack(side="left")
+    ttk.Checkbutton(top, text="also show models that do not fit this PC", variable=v_show_all,
                     command=lambda: fill_models()).pack(side="right")
-    models = ttk.Treeview(t_model, columns=("size", "ram", "status", "runs", "id"),
-                          show="tree headings", height=10, selectmode="browse")
+    ttk.Label(t_model, style="Hint.TLabel", wraplength=1000, justify="left",
+              text="Checked against this PC's memory and disk. Small models run from RAM and answer "
+                   "quickly; large ones keep part of the model on the SSD and are much slower.").pack(anchor="w")
+    ttk.Radiobutton(t_model, text="Download one from the list", variable=v_use_local, value=False,
+                    command=lambda: refresh_mode()).pack(anchor="w", pady=(8, 0))
+    models = ttk.Treeview(t_model, columns=("size", "ram", "fit", "runs"),
+                          show="tree headings", height=8, selectmode="browse")
     models.heading("#0", text="Model")
-    models.column("#0", width=250)
-    for col, text, width in (("size", "Download", 85), ("ram", "RAM min / best", 110),
-                             ("status", "Fits", 85), ("runs", "Runs", 200), ("id", "id", 170)):
+    models.column("#0", width=280)
+    for col, text, width_ in (("size", "Download", 90), ("ram", "RAM needed / best", 130),
+                              ("fit", "On this PC", 140), ("runs", "Runs", 220)):
         models.heading(col, text=text)
-        models.column(col, width=width, anchor="w")
-    models.tag_configure("rec", font=("Segoe UI", 9, "bold"))
-    models.tag_configure("nofit", foreground="#999999")
-    models.pack(fill="both", expand=True, pady=6)
-    model_info = ttk.Label(t_model, text="", wraplength=980, justify="left")
+        models.column(col, width=width_, anchor="w")
+    models.tag_configure("rec", font=(base_font[0], 10, "bold"))
+    models.tag_configure("nofit", foreground="#9aa0a6")
+    models.insert("", "end", iid="__wait", text="Checking this PC...", values=("", "", "", ""))
+    models.pack(fill="both", expand=True, pady=4)
+    model_info = ttk.Label(t_model, text="", wraplength=1000, justify="left")
     model_info.pack(anchor="w", fill="x")
     local = ttk.Frame(t_model)
     local.pack(fill="x", pady=(8, 0))
-    ttk.Radiobutton(local, text="Use a model folder already on disk:", variable=v_use_local,
+    ttk.Radiobutton(local, text="Or use a model folder already on this PC:", variable=v_use_local,
                     value=True, command=lambda: refresh_mode()).pack(side="left")
     local_entry = ttk.Entry(local, textvariable=v_model_dir)
     local_entry.pack(side="left", fill="x", expand=True, padx=6)
     local_btn = ttk.Button(local, text="Browse...",
                            command=lambda: pick_dir(v_model_dir, "The model folder (with config.json)"))
     local_btn.pack(side="left")
+    nav = ttk.Frame(t_model)
+    nav.pack(fill="x", pady=(10, 0))
 
-    # Locations
-    t_loc = tab("Locations")
-    t_loc.columnconfigure(1, weight=1)
-    form_row(t_loc, 0, "Models folder", v_root, browse=lambda: pick_dir(v_root, "Where to download models"),
-             hint="Each catalog model goes in its own subfolder here (for example "
-                  "D:\\colibri-models\\qwen36-35b). A stopped download resumes in the same folder.")
-    free_label = ttk.Label(t_loc, text="")
+    # 2 Location
+    t_loc = tab(" 2  Location ")
+    ttk.Label(t_loc, text="Where models are saved", style="Head.TLabel").pack(anchor="w")
+    ttk.Label(t_loc, style="Hint.TLabel", wraplength=1000, justify="left",
+              text="Pick the fastest internal SSD with room (double-click a drive). Large models are "
+                   "read from it while they answer: never a network or USB drive.").pack(anchor="w")
+    drives = ttk.Treeview(t_loc, columns=("free", "total"), height=4)
+    drives.heading("#0", text="Drive")
+    drives.heading("free", text="Free")
+    drives.heading("total", text="Size")
+    drives.pack(fill="x", pady=6)
+    loc = ttk.Frame(t_loc)
+    loc.pack(fill="x")
+    loc.columnconfigure(1, weight=1)
+    form_row(loc, 0, "Models folder", v_root, browse=lambda: pick_dir(v_root, "Where to save models"),
+             hint="Each model gets its own subfolder here, for example D:\\colibri-models\\qwen36-35b.")
+    free_label = ttk.Label(loc, text="")
     free_label.grid(row=2, column=1, sticky="w", padx=6)
-    split_entry = form_row(t_loc, 3, "Extra shard folders", v_split,
-                           hint="Only for a model split across drives, when its engine reads extra "
-                                "folders (the variable is shown in the command). Separate folders "
-                                "with ';'. The setup keeps them in setup.json.")
-    form_row(t_loc, 5, "Hugging Face token", v_token, show="*",
-             hint="Only for gated repositories. Passed to this run as HF_TOKEN and never written "
-                  "to disk; `hf auth login` stores one permanently instead.")
-    ttk.Separator(t_loc).grid(row=7, column=0, columnspan=3, sticky="ew", pady=10)
-    ttk.Label(t_loc, text="Setup folder").grid(row=8, column=0, sticky="w")
-    ttk.Label(t_loc, text=setup_flow.setup_home()).grid(row=8, column=1, sticky="w", padx=6)
-    ttk.Button(t_loc, text="Open", command=lambda: open_path(setup_flow.setup_home())).grid(row=8, column=2)
-    ttk.Label(t_loc, style="Hint.TLabel", wraplength=780, justify="left",
-              text="setup.json, install-state.json, logs and the prebuilt runtime live here "
-                   "(set COLI_SETUP_HOME before starting this window to move it)."
-              ).grid(row=9, column=1, sticky="w", padx=6)
-    ttk.Label(t_loc, text="colibri folder").grid(row=10, column=0, sticky="w", pady=(8, 0))
-    ttk.Label(t_loc, text=os.path.dirname(HERE)).grid(row=10, column=1, sticky="w", padx=6, pady=(8, 0))
-    ttk.Button(t_loc, text="Open", command=lambda: open_path(os.path.dirname(HERE))
-               ).grid(row=10, column=2, pady=(8, 0))
+    adv = ttk.LabelFrame(t_loc, text="Only if you need them", padding=8)
+    adv.pack(fill="x", pady=(12, 0))
+    adv.columnconfigure(1, weight=1)
+    form_row(adv, 0, "Hugging Face token", v_token, show="*",
+             hint="For gated models only. Used for this install and never saved; "
+                  "`hf auth login` stores one permanently instead.")
+    split_entry = form_row(adv, 2, "Extra shard folders", v_split,
+                           hint="For a very large model split across drives, when its engine supports it. "
+                                "Separate folders with ';'.")
+    nav = ttk.Frame(t_loc)
+    nav.pack(fill="x", side="bottom")
 
-    # Run
-    t_run = tab("Run")
-    t_run.columnconfigure(1, weight=1)
-    ttk.Label(t_run, text="Backend").grid(row=0, column=0, sticky="w", pady=4)
-    bk = ttk.Frame(t_run)
+    # 3 Options
+    t_run = tab(" 3  Options ")
+    ttk.Label(t_run, text="How it runs", style="Head.TLabel").pack(anchor="w")
+    ttk.Label(t_run, style="Hint.TLabel", text="The defaults suit most PCs.").pack(anchor="w", pady=(0, 8))
+    opts = ttk.Frame(t_run)
+    opts.pack(fill="x")
+    opts.columnconfigure(1, weight=1)
+    ttk.Label(opts, text="Use").grid(row=0, column=0, sticky="nw", pady=4)
+    bk = ttk.Frame(opts)
     bk.grid(row=0, column=1, sticky="w", padx=6)
-    for value, text in (("auto", "Automatic"), ("cuda", "NVIDIA CUDA"),
-                        ("vulkan", "Vulkan (any GPU)"), ("cpu", "CPU only")):
+    for value, text in (("auto", "Automatic (recommended)"), ("cuda", "NVIDIA GPU (CUDA)"),
+                        ("vulkan", "Any GPU (Vulkan)"), ("cpu", "CPU only")):
         ttk.Radiobutton(bk, text=text, value=value, variable=v_backend,
-                        command=lambda: update_cmd()).pack(side="left", padx=(0, 12))
-    ttk.Label(t_run, style="Hint.TLabel", wraplength=780, justify="left",
-              text="Automatic picks CUDA when the toolkit builds for the card, then Vulkan, then "
-                   "the CPU; a build that fails falls back to the next one.").grid(
-        row=1, column=1, sticky="w", padx=6)
-    form_row(t_run, 2, "Address", v_host,
-             hint="127.0.0.1 keeps the server on this computer; 0.0.0.0 opens it to the network.")
-    form_row(t_run, 4, "Port", v_port)
-    form_row(t_run, 5, "Context (tokens)", v_ctx, hint="0 = automatic, sized from the memory there is.")
-    ttk.Label(t_run, text="After the setup").grid(row=7, column=0, sticky="w", pady=(10, 4))
-    st = ttk.Frame(t_run)
-    st.grid(row=7, column=1, sticky="w", padx=6, pady=(10, 4))
-    ttk.Radiobutton(st, text="Start the server in the background", value="background", variable=v_start,
-                    command=lambda: update_cmd()).pack(side="left", padx=(0, 12))
-    ttk.Radiobutton(st, text="Do not start", value="no", variable=v_start,
-                    command=lambda: update_cmd()).pack(side="left")
-    ttk.Checkbutton(t_run, text="Do not open the browser", variable=v_no_browser,
-                    command=lambda: update_cmd()).grid(row=8, column=1, sticky="w", padx=6)
-    ttk.Checkbutton(t_run, text="Skip the checksum of downloaded files (faster, less safe)",
-                    variable=v_no_verify, command=lambda: update_cmd()).grid(row=9, column=1, sticky="w", padx=6)
+                        command=lambda: update_plan()).pack(side="left", padx=(0, 14))
+    ttk.Label(opts, style="Hint.TLabel", wraplength=760, justify="left",
+              text="Automatic tries CUDA, then Vulkan, then the CPU, and falls back if a build fails."
+              ).grid(row=1, column=1, sticky="w", padx=6)
+    form_row(opts, 2, "Context (tokens)", v_ctx, width=10,
+             hint="How much text the model keeps in mind. 0 = automatic. Coding apps such as Hermes "
+                  "need 65536 or more.")
+    form_row(opts, 4, "Port", v_port, width=8)
+    form_row(opts, 5, "Address", v_host, width=18,
+             hint="127.0.0.1 = this PC only. 0.0.0.0 = other computers on your network too.")
+    ttk.Label(opts, text="After installing").grid(row=7, column=0, sticky="w", pady=(12, 4))
+    st = ttk.Frame(opts)
+    st.grid(row=7, column=1, sticky="w", padx=6, pady=(12, 4))
+    ttk.Radiobutton(st, text="Start the server", value="background", variable=v_start,
+                    command=lambda: update_plan()).pack(side="left", padx=(0, 14))
+    ttk.Radiobutton(st, text="Don't start it yet", value="no", variable=v_start,
+                    command=lambda: update_plan()).pack(side="left")
+    ttk.Checkbutton(opts, text="Don't open the chat in the browser", variable=v_no_browser,
+                    command=lambda: update_plan()).grid(row=8, column=1, sticky="w", padx=6)
+    ttk.Checkbutton(opts, text="Skip checking downloaded files (faster, less safe)",
+                    variable=v_no_verify, command=lambda: update_plan()).grid(row=9, column=1, sticky="w", padx=6)
+    nav = ttk.Frame(t_run)
+    nav.pack(fill="x", side="bottom")
 
-    # Current setup
-    t_cur = tab("Current setup")
-    cur = ttk.Treeview(t_cur, columns=("value",), show="tree", height=14)
-    cur.column("#0", width=170)
-    cur.column("value", width=780)
-    cur.pack(fill="both", expand=True)
-    cb = ttk.Frame(t_cur)
-    cb.pack(fill="x", pady=6)
-    ttk.Button(cb, text="Reload", command=lambda: load_current()).pack(side="left")
-    ttk.Button(cb, text="Open setup.json", command=lambda: open_path(setup_flow.config_path())
-               ).pack(side="left", padx=6)
-    ttk.Button(cb, text="Server log", command=lambda: run_coli(["logs", "-n", "200"])).pack(side="left")
-    ttk.Button(cb, text="Install log", command=lambda: run_coli(["logs", "--install", "-n", "200"])
-               ).pack(side="left", padx=6)
-    ttk.Button(cb, text="Choose again (reconfigure)", command=lambda: (nb.select(t_model))).pack(side="right")
+    # 4 Install
+    t_inst = tab(" 4  Install ")
+    inst_head = ttk.Label(t_inst, text="Ready to install", style="Head.TLabel")
+    inst_head.pack(anchor="w")
+    plan_box = ttk.Label(t_inst, text="", justify="left", wraplength=1000)
+    plan_box.pack(anchor="w", pady=(8, 4))
+    warn_box = ttk.Label(t_inst, text="", justify="left", wraplength=1000, style="Warn.TLabel")
+    warn_box.pack(anchor="w")
+    b_apply = ttk.Button(t_inst, text="Install", style="Big.TButton", command=lambda: apply())
+    b_apply.pack(anchor="w", pady=14)
+    ttk.Label(t_inst, style="Hint.TLabel", wraplength=1000, justify="left",
+              text="Safe to cancel or close the window at any time: Install again continues where it "
+                   "stopped. Already installed? Install just checks and starts it.").pack(anchor="w")
+    cmd_row = ttk.Frame(t_inst)
+    cmd_row.pack(fill="x", side="bottom")
+    ttk.Label(cmd_row, text="Same as typing:", style="Hint.TLabel").pack(side="left")
+    ttk.Entry(cmd_row, textvariable=v_cmd, state="readonly", font=("Consolas", 9)
+              ).pack(side="left", fill="x", expand=True, padx=6)
+    ttk.Button(cmd_row, text="Copy", command=lambda: (root.clipboard_clear(), root.clipboard_append(v_cmd.get()))
+               ).pack(side="left")
 
-    # Connect apps: coding tools pointed at the running server
-    t_apps = tab("Connect apps")
+    # Connect apps
+    t_apps = tab(" Connect apps ")
     v_app_model = tk.StringVar(value="")
     v_app_key = tk.StringVar(value="local")
     v_app_folder = tk.StringVar(value=os.path.expanduser("~"))
-    apps_state = {"models": [], "found": {}}
+    ttk.Label(t_apps, text="Use this model from a coding app", style="Head.TLabel").pack(anchor="w")
+    ttk.Label(t_apps, style="Hint.TLabel", wraplength=1000, justify="left",
+              text="Like a local Ollama: while the server runs, these apps can use it instead of a cloud "
+                   "model. Pick an app; Open in terminal starts it in your project already connected, "
+                   "without changing its own settings.").pack(anchor="w")
     head = ttk.Frame(t_apps)
-    head.pack(fill="x")
+    head.pack(fill="x", pady=(8, 0))
     ttk.Label(head, text="Model").pack(side="left")
-    app_model = ttk.Combobox(head, textvariable=v_app_model, width=32)
+    app_model = ttk.Combobox(head, textvariable=v_app_model, width=30)
     app_model.pack(side="left", padx=(4, 12))
     ttk.Label(head, text="API key").pack(side="left")
-    ttk.Entry(head, textvariable=v_app_key, width=14).pack(side="left", padx=(4, 12))
+    ttk.Entry(head, textvariable=v_app_key, width=12).pack(side="left", padx=(4, 12))
     ttk.Button(head, text="Refresh", command=lambda: refresh_apps()).pack(side="left")
     app_server = ttk.Label(head, text="", style="Hint.TLabel")
     app_server.pack(side="left", padx=10)
     body = ttk.PanedWindow(t_apps, orient="horizontal")
     body.pack(fill="both", expand=True, pady=6)
-    app_list = ttk.Treeview(body, columns=("state",), show="tree headings", height=8, selectmode="browse")
+    app_list = ttk.Treeview(body, columns=("state",), show="tree headings", height=7, selectmode="browse")
     app_list.heading("#0", text="App")
     app_list.heading("state", text="On this PC")
-    app_list.column("#0", width=190)
-    app_list.column("state", width=110)
+    app_list.column("#0", width=200)
+    app_list.column("state", width=100)
     for entry in agent_connect.TOOLS:
         app_list.insert("", "end", iid=entry["id"], text=entry["name"], values=("",))
     body.add(app_list, weight=1)
     right = ttk.Frame(body)
     body.add(right, weight=3)
-    app_text = tk.Text(right, wrap="word", font=("Consolas", 9), height=12)
+    app_text = tk.Text(right, wrap="word", font=("Consolas", 9), height=10, relief="flat")
     app_ysb = ttk.Scrollbar(right, orient="vertical", command=app_text.yview)
     app_text.configure(yscrollcommand=app_ysb.set)
     app_ysb.pack(side="right", fill="y")
@@ -486,43 +707,51 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                ).pack(side="left")
     b_app_open = ttk.Button(foot, text="Open in terminal", command=lambda: open_app())
     b_app_open.pack(side="left", padx=(12, 4))
-    b_bridge = ttk.Button(foot, text="Start bridge", command=lambda: start_bridge())
+    b_bridge = ttk.Button(foot, text="Start Codex bridge", command=lambda: start_bridge())
     b_bridge.pack(side="left")
     ttk.Button(foot, text="Copy instructions", command=lambda: (
         root.clipboard_clear(), root.clipboard_append(app_text.get("1.0", "end-1c")))).pack(side="left", padx=4)
+    app_reason = ttk.Label(t_apps, text="", style="Hint.TLabel")
+    app_reason.pack(anchor="w", pady=(4, 0))
 
-    # Bottom: command, actions, output
-    cmdbar = ttk.Frame(bottom)
-    cmdbar.pack(fill="x", pady=(6, 2))
-    ttk.Label(cmdbar, text="Command:").pack(side="left")
-    ttk.Entry(cmdbar, textvariable=v_cmd, state="readonly", font=("Consolas", 9)
-              ).pack(side="left", fill="x", expand=True, padx=6)
-    ttk.Button(cmdbar, text="Copy", command=lambda: (root.clipboard_clear(), root.clipboard_append(v_cmd.get()))
-               ).pack(side="left")
-    actions = ttk.Frame(bottom)
-    actions.pack(fill="x", pady=4)
-    b_apply = ttk.Button(actions, text="Install / Apply", command=lambda: apply())
-    b_apply.pack(side="left")
-    b_start = ttk.Button(actions, text="Start", command=lambda: run_coli(
-        ["start", "--background"] + (["--no-browser"] if v_no_browser.get() else [])))
-    b_start.pack(side="left", padx=4)
-    b_stop = ttk.Button(actions, text="Stop", command=lambda: run_coli(["stop"]))
-    b_stop.pack(side="left")
-    b_status = ttk.Button(actions, text="Status", command=lambda: run_coli(["status"]))
-    b_status.pack(side="left", padx=4)
-    ttk.Button(actions, text="Open dashboard", command=lambda: open_dashboard()).pack(side="left")
-    ttk.Button(actions, text="Clear output", command=lambda: log.delete("1.0", "end")).pack(side="right", padx=4)
-    b_cancel = ttk.Button(actions, text="Cancel", command=lambda: cancel(), state="disabled")
-    b_cancel.pack(side="right")
-    out = ttk.Frame(bottom)
-    out.pack(fill="both", expand=True)
-    log = tk.Text(out, height=10, wrap="none", font=("Consolas", 9), background="#111111",
-                  foreground="#dddddd", insertbackground="#dddddd")
-    ysb = ttk.Scrollbar(out, orient="vertical", command=log.yview)
-    log.configure(yscrollcommand=ysb.set)
-    ysb.pack(side="right", fill="y")
-    log.pack(side="left", fill="both", expand=True)
-    ttk.Label(root, textvariable=v_status, anchor="w", relief="sunken").pack(fill="x", side="bottom")
+    # This PC
+    t_pc = tab(" This PC ")
+    ttk.Label(t_pc, text="What colibri sees on this PC", style="Head.TLabel").pack(anchor="w")
+    hw_text = tk.Text(t_pc, height=9, wrap="word", font=("Consolas", 10), relief="flat")
+    hw_text.pack(fill="x", pady=(6, 10))
+    hw_text.insert("1.0", "Checking the hardware (the GPU check takes a few seconds)...")
+    hw_text.configure(state="disabled")
+    paths = ttk.Frame(t_pc)
+    paths.pack(fill="x")
+    paths.columnconfigure(1, weight=1)
+    for r, (label, path) in enumerate((("Settings and logs", setup_flow.setup_home()),
+                                       ("colibri folder", os.path.dirname(HERE)))):
+        ttk.Label(paths, text=label).grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Label(paths, text=path).grid(row=r, column=1, sticky="w", padx=6)
+        ttk.Button(paths, text="Open", command=lambda p=path: open_path(p)).grid(row=r, column=2)
+    ttk.Button(t_pc, text="Check again", command=lambda: detect()).pack(anchor="w", pady=10)
+
+    # Details
+    t_cur = tab(" Details ")
+    cur = ttk.Treeview(t_cur, columns=("value",), show="tree", height=14)
+    cur.column("#0", width=170)
+    cur.column("value", width=780)
+    cur.pack(fill="both", expand=True)
+    cb = ttk.Frame(t_cur)
+    cb.pack(fill="x", pady=6)
+    ttk.Button(cb, text="Reload", command=lambda: load_current()).pack(side="left")
+    ttk.Button(cb, text="Open setup.json", command=lambda: open_path(setup_flow.config_path())
+               ).pack(side="left", padx=6)
+    ttk.Button(cb, text="Server log", command=lambda: run_coli(["logs", "-n", "200"], "show")).pack(side="left")
+    ttk.Button(cb, text="Install log", command=lambda: run_coli(["logs", "--install", "-n", "200"], "show")
+               ).pack(side="left", padx=6)
+    ttk.Button(cb, text="Full status", command=lambda: run_coli(["status"], "show")).pack(side="left")
+
+    # navigation between the numbered steps
+    for frame, label, target in ((t_model, "Next: location  >", t_loc), (t_loc, "Next: options  >", t_run),
+                                 (t_run, "Next: install  >", t_inst)):
+        holder = [c for c in frame.winfo_children() if isinstance(c, ttk.Frame)][-1]
+        next_button(holder, label, target)
 
     # ---- behaviour
     def pick_dir(var, title):
@@ -534,7 +763,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand
     def open_path(path):
         target = path if os.path.exists(path) else os.path.dirname(path)
         if not os.path.exists(target):
-            messagebox.showinfo("colibri", f"{path} does not exist yet: run the setup first.")
+            messagebox.showinfo("colibri", f"{path} does not exist yet: install first.")
             return
         if sys.platform == "win32":
             os.startfile(target)  # a folder or file the user asked to open
@@ -542,10 +771,23 @@ def main():  # pragma: no cover - the window itself is exercised by hand
             subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", target])
 
     def open_dashboard():
-        cfg = setup_flow.load_config() or {}
+        cfg = state["cfg"] or {}
         host = cfg.get("host") or v_host.get() or setup_flow.DEFAULT_HOST
         port = cfg.get("port") or v_port.get() or setup_flow.DEFAULT_PORT
         webbrowser.open(setup_flow.urls(host, port)["browser"])
+
+    def show_output(on=True):
+        if on and not out_frame.winfo_ismapped():
+            out_tools.pack(fill="x", side="bottom", pady=(4, 0))
+            out_frame.pack(fill="both", expand=True, pady=(6, 0))
+            b_toggle.configure(text="Hide output")
+        elif not on and out_frame.winfo_ismapped():
+            out_frame.pack_forget()
+            out_tools.pack_forget()
+            b_toggle.configure(text="Show output")
+
+    def toggle_output():
+        show_output(not out_frame.winfo_ismapped())
 
     def log_write(text):
         # A carriage return is a progress line redrawn in place.
@@ -575,11 +817,18 @@ def main():  # pragma: no cover - the window itself is exercised by hand
     def run_extra():
         return extra_env(v_token.get(), split_name_for(current_family()), v_split.get())
 
-    def update_cmd(*_):
+    def chosen_row():
+        if v_use_local.get():
+            return None
+        return next((r for r in state["rows"] if r["id"] == v_model.get()), None)
+
+    def update_plan(*_):
         try:
             v_cmd.set(display_command(setup_command(options(), python=py), run_extra()))
+            valid = True
         except ValueError as error:
             v_cmd.set(f"(not valid yet: {error})")
+            valid = False
         split_entry.configure(state="normal" if split_name_for(current_family()) else "disabled")
         path = v_root.get()
         free = setup_hw.disk_free(path) if path else None
@@ -587,19 +836,42 @@ def main():  # pragma: no cover - the window itself is exercised by hand
             entry = None if v_use_local.get() or not v_model.get() else setup_catalog.by_id(v_model.get())
         except KeyError:
             entry = None
-        text = f"{setup_hw.fmt_gb(free)} free there" if free is not None else ""
         note = space_note(entry, free)
+        text = f"{setup_hw.fmt_gb(free)} free there" if free is not None else ""
         free_label.configure(text=f"{text}; {note}" if note else text,
-                             foreground="#b00020" if "NOT ENOUGH" in note else "")
+                             style="Warn.TLabel" if "NOT ENOUGH" in note else "TLabel")
+        lines, warnings = plan_lines(options(), chosen_row(), free)
+        if not valid:
+            warnings.insert(0, v_cmd.get())
+        plan_box.configure(text="\n".join(f"  {i}.  {line}" if not line.startswith("   ") else line
+                                          for i, line in zip(_numbers(lines), lines)))
+        warn_box.configure(text="\n".join(f"  !  {w}" for w in warnings))
+        busy = state["proc"] is not None
+        if busy and state["proc_kind"] == "setup":
+            inst_head.configure(text="Installing...  (progress at the bottom)")
+        elif state["ready"]:
+            inst_head.configure(text="Installed. Install again to apply changed choices; "
+                                     "Open chat or Connect apps to use it")
+        else:
+            inst_head.configure(text="Ready to install")
+        b_apply.configure(state="disabled" if busy or not valid or
+                          (not v_use_local.get() and not v_model.get()) else "normal")
 
-    for var in (v_root, v_host, v_port, v_ctx, v_model_dir, v_token, v_split):
-        var.trace_add("write", update_cmd)
+    def _numbers(lines):
+        n = 0
+        for line in lines:
+            if not line.startswith("   "):
+                n += 1
+            yield n
+
+    for var in (v_root, v_host, v_port, v_ctx, v_model_dir, v_token, v_split, v_model):
+        var.trace_add("write", update_plan)
 
     def refresh_mode():
         mode = "normal" if v_use_local.get() else "disabled"
         local_entry.configure(state=mode)
         local_btn.configure(state=mode)
-        update_cmd()
+        update_plan()
 
     def fill_models():
         models.delete(*models.get_children())
@@ -612,44 +884,43 @@ def main():  # pragma: no cover - the window itself is exercised by hand
             models.insert("", "end", iid=r["id"], tags=tags,
                           text=r["name"] + ("   (recommended)" if r["recommended"] else ""),
                           values=(f"{r['download_gb']:.0f} GB", f"{r['ram_min_gb']:g} / {r['ram_good_gb']:g} GB",
-                                  r["status"], "makes images" if r["kind"] == "image" else r["runs"], r["id"]))
+                                  fit_words(r["status"]),
+                                  "makes images" if r["kind"] == "image" else r["runs"]))
+        if hidden:
+            models.insert("", "end", iid="__more", tags=("nofit",),
+                          text=f"+ {hidden} more (too big for this PC)",
+                          values=("", "", "", ""))
         if not v_model.get() and not v_use_local.get():
-            rec = next((r["id"] for r in state["rows"] if r["recommended"]), "")
-            v_model.set(rec)
+            v_model.set(next((r["id"] for r in state["rows"] if r["recommended"]), ""))
         if v_model.get() and models.exists(v_model.get()):
             models.selection_set(v_model.get())
             models.see(v_model.get())
-        if hidden:
-            v_status.set(f"{hidden} more models need more RAM or disk than this machine has "
-                         "(tick 'also show' to see why).")
 
     def on_select(_event=None):
-        sel = models.selection()
+        sel = [s for s in models.selection() if not s.startswith("__")]
         if not sel:
             return
         iid = sel[0]
         r = next((x for x in state["rows"] if x["id"] == iid), None)
         if r:
-            text = f"{r['name']}  ({r['repo']})\n{r['summary']}.  {r['reason']}."
+            text = f"{r['name']}: {r['summary']}.\n{fit_words(r['status'])}: {r['reason']}."
             if r["license_note"]:
                 text += f"\nLicense: {r['license_note']}"
-            if r["doc"]:
-                text += f"\nMore: {r['doc']} in the colibri folder"
             model_info.configure(text=text)
         if _event is not None:
             v_model.set(iid)
             if v_use_local.get():
                 v_use_local.set(False)
                 refresh_mode()
-        update_cmd()
+        update_plan()
 
     models.bind("<<TreeviewSelect>>", on_select)
+    models.bind("<Double-1>", lambda _e: nb.select(t_loc))
 
     def on_drive(_event):
         sel = drives.selection()
         if sel:
             v_root.set(os.path.join(drives.item(sel[0], "text"), "colibri-models"))
-            nb.select(t_loc)
 
     drives.bind("<Double-1>", on_drive)
 
@@ -658,37 +929,138 @@ def main():  # pragma: no cover - the window itself is exercised by hand
         cur.delete(*cur.get_children())
         for label, value in config_summary(cfg):
             cur.insert("", "end", text=label, values=(value,))
-        if not cfg:
-            return
-        cur.insert("", "end", text="runnable",
-                   values=("yes" if setup_flow.config_ready(cfg) else "no: Install / Apply finishes it",))
-        try:
-            server = setup_flow.server_status(cfg) if cfg.get("port") else None
-        except Exception:  # a status probe never breaks the window
-            server = None
+        if cfg:
+            cur.insert("", "end", text="runnable", values=("yes" if state["ready"] else "no: Install finishes it",))
+        server = state["server"]
         if server:
             cur.insert("", "end", text="server", values=(server.get("state", "?")
                        + (f"  (pid {server['pid']})" if server.get("pid") else ""),))
-            cur.insert("", "end", text="dashboard", values=(server["urls"]["browser"],))
+            cur.insert("", "end", text="chat", values=(server["urls"]["browser"],))
             cur.insert("", "end", text="OpenAI base URL", values=(server["urls"]["openai_base_url"],))
+            cur.insert("", "end", text="Anthropic base URL", values=(server["urls"]["anthropic_base_url"],))
+
+    def show_server():
+        cfg = state["cfg"]
+        colour, text = server_words(state["server"], cfg)
+        dot.itemconfigure(dot_id, fill={"green": "#1e8e3e", "orange": "#f29900", "grey": "#9aa0a6"}[colour])
+        v_server.set(text)
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        busy = state["proc"] is not None
+        b_start.configure(state="normal" if state["ready"] and not running and not busy else "disabled")
+        b_stop.configure(state="normal" if running and not busy else "disabled")
+        b_chat.configure(state="normal" if (state["server"] or {}).get("state") == "ready" else "disabled")
+
+    def watch_server():
+        """Every few seconds: the saved configuration, whether it is runnable, the server."""
+        while not state["closing"]:
+            try:
+                cfg = setup_flow.load_config() or {}
+                ready = setup_flow.config_ready(cfg) if cfg else False
+                server = setup_flow.server_status(cfg) if cfg.get("port") else None
+                events.put(("server", (cfg, ready, server)))
+            except Exception:  # a status probe never stops the window
+                traceback.print_exc(file=sys.stderr)
+            for _ in range(8):
+                if state["closing"]:
+                    return
+                time.sleep(0.5)
 
     def detect():
-        v_status.set("Detecting the hardware...")
         target = v_root.get() or setup_flow.default_models_root()
+        hw_text.configure(state="normal")
+        hw_text.delete("1.0", "end")
+        hw_text.insert("1.0", "Checking the hardware...")
+        hw_text.configure(state="disabled")
 
         def work():
             try:
-                hw = setup_hw.detect(target)
+                done = subprocess.run(detect_command(target, py), capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=180,
+                                      stdin=subprocess.DEVNULL, creationflags=NO_WINDOW)
+                hw = json.loads(done.stdout)
                 rows = catalog_rows(hw["memory"].get("total"), setup_hw.disk_free(target),
                                     downloaded_bytes(target), machine=hw["os"].get("machine"))
                 events.put(("hw", (hw, rows, drive_report())))
-            except Exception as error:  # shown, not raised: the window stays usable
-                events.put(("error", f"hardware detection failed: {error}"))
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
+                events.put(("error", f"The hardware check failed ({error}); the model list "
+                                     "assumes nothing about this PC."))
+                rows = catalog_rows(None, setup_hw.disk_free(target), {})
+                events.put(("hw", (None, rows, drive_report())))
 
         threading.Thread(target=work, daemon=True).start()
 
+    def busy(kind):
+        state["proc_kind"] = kind
+        b_cancel.configure(state="normal" if kind else "disabled")
+        show_server()
+        update_plan()
+
+    def launch(cmd, extra, kind):
+        if state["proc"]:
+            messagebox.showinfo("colibri", "Something is already running: wait for it, or Cancel.")
+            return
+        log_write(f"\n> {display_command(cmd, extra)}\n")
+        try:
+            proc = subprocess.Popen(cmd, cwd=HERE, env=child_env(extra), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
+        except OSError as error:
+            log_write(f"could not start it: {error}\n")
+            show_output()
+            return
+        state["proc"] = proc
+        busy(kind)
+        progress.configure(mode="indeterminate")
+        progress.start(12)
+        v_status.set({"setup": "Installing...", "start": "Starting the server...",
+                      "stop": "Stopping the server..."}.get(kind, "Working..."))
+        if kind == "show":
+            show_output()
+
+        def pump():
+            while True:
+                chunk = proc.stdout.read1(4096)
+                if not chunk:
+                    break
+                events.put(("out", chunk.decode("utf-8", "replace")))
+            events.put(("done", (kind, proc.wait())))
+
+        threading.Thread(target=pump, daemon=True).start()
+
+    def run_coli(args, kind):
+        launch([py, COLI] + args, {}, kind)
+
+    def apply():
+        if v_use_local.get():
+            if not v_model_dir.get().strip():
+                messagebox.showwarning("colibri", "Choose the model folder first (step 1).")
+                return
+            if not os.path.isfile(os.path.join(v_model_dir.get(), "config.json")) and not \
+                    messagebox.askyesno("colibri", f"{v_model_dir.get()} has no config.json. Use it anyway?"):
+                return
+        try:
+            cmd = setup_command(options(), python=py)
+        except ValueError as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        _, warnings = plan_lines(options(), chosen_row(), setup_hw.disk_free(v_root.get()) if v_root.get() else None)
+        if warnings and not messagebox.askyesno("colibri", "Before you install:\n\n" + "\n\n".join(warnings)
+                                                + "\n\nInstall anyway?"):
+            return
+        launch(cmd, run_extra(), "setup")
+
+    def cancel():
+        proc = state["proc"]
+        if proc and proc.poll() is None:
+            if sys.platform == "win32":
+                subprocess.run(kill_tree_command(proc.pid), capture_output=True, creationflags=NO_WINDOW)
+            else:
+                proc.terminate()
+            state["cancelled"] = True
+            log_write("\n(cancelled: Install again continues where it stopped)\n")
+
+    # Connect apps
     def app_conn():
-        found = dict(apps_state["models"])
+        found = dict(state["apps_models"])
         model = v_app_model.get().strip() or None
         return agent_connect.connection(state["cfg"], model=model, ctx=found.get(model),
                                         key=v_app_key.get().strip() or "local")
@@ -701,8 +1073,9 @@ def main():  # pragma: no cover - the window itself is exercised by hand
         app_text.delete("1.0", "end")
         app_text.insert("1.0", agent_connect.instructions(tool_id, app_conn()))
         app_text.configure(state="disabled")
-        can_open = entry["launch"] and sys.platform == "win32" and bool(apps_state["found"].get(tool_id))
-        b_app_open.configure(state="normal" if can_open else "disabled")
+        reason = open_reason(entry, state["apps_found"].get(tool_id), sys.platform, bool(state["apps_models"]))
+        b_app_open.configure(state="disabled" if reason else "normal")
+        app_reason.configure(text=reason)
         b_bridge.configure(state="normal" if entry.get("bridge") else "disabled")
 
     app_list.bind("<<TreeviewSelect>>", show_app)
@@ -714,10 +1087,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand
         app_server.configure(text=f"asking {conn['base']} ...")
 
         def work():
-            models = agent_connect.served_models(conn["base"], v_app_key.get().strip())
+            served = agent_connect.served_models(conn["base"], v_app_key.get().strip())
             found = {e["id"]: agent_connect.find_exe(e) for e in agent_connect.TOOLS}
             bridge = agent_connect.answers(conn["bridge"] + "/")
-            events.put(("apps", (conn["base"], models, found, bridge)))
+            events.put(("apps", (conn["base"], served, found, bridge)))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -726,18 +1099,17 @@ def main():  # pragma: no cover - the window itself is exercised by hand
         if not sel:
             return
         tool_id = sel[0]
-        exe = apps_state["found"].get(tool_id)
         conn = app_conn()
         try:
-            if agent_connect.tool(tool_id).get("bridge"):
-                if agent_connect.start_bridge(conn, python=py):
-                    log_write(f"\nstarted the Codex bridge (coli ui) on {conn['bridge']}; "
-                              f"its log: {os.path.join(setup_flow.setup_home(), 'logs', 'bridge.log')}\n")
-            script = agent_connect.open_in_terminal(tool_id, conn, v_app_folder.get(), exe)
+            if agent_connect.tool(tool_id).get("bridge") and agent_connect.start_bridge(conn, python=py):
+                log_write(f"\nstarted the Codex bridge (coli ui) on {conn['bridge']}\n")
+            script = agent_connect.open_in_terminal(tool_id, conn, v_app_folder.get(),
+                                                    state["apps_found"].get(tool_id))
         except (ValueError, OSError) as error:
             messagebox.showerror("colibri", str(error))
             return
-        log_write(f"\nopened {agent_connect.tool(tool_id)['name']} in a new window ({script})\n")
+        v_status.set(f"Opened {agent_connect.tool(tool_id)['name']} in a new window.")
+        log_write(f"\nopened {agent_connect.tool(tool_id)['name']} ({script})\n")
 
     def start_bridge():
         conn = app_conn()
@@ -746,80 +1118,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand
         except OSError as error:
             messagebox.showerror("colibri", str(error))
             return
-        log_write(f"\n> {display_command(agent_connect.bridge_command(conn, python=py))}\n"
-                  + ("started in the background" if started else f"already answering on {conn['bridge']}")
-                  + "\n")
+        v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
 
-    def busy(on):
-        for button in (b_apply, b_start, b_stop, b_status):
-            button.configure(state="disabled" if on else "normal")
-        b_cancel.configure(state="normal" if on else "disabled")
-
-    def launch(cmd, extra):
-        if state["proc"]:
-            messagebox.showinfo("colibri", "A command is already running: wait for it, or Cancel.")
-            return
-        log_write(f"\n> {display_command(cmd, extra)}\n")
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
-        try:
-            proc = subprocess.Popen(cmd, cwd=HERE, env=child_env(extra), stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
-        except OSError as error:
-            log_write(f"could not start it: {error}\n")
-            return
-        state["proc"] = proc
-        busy(True)
-        v_status.set("Running...")
-
-        def pump():
-            while True:
-                chunk = proc.stdout.read1(4096)
-                if not chunk:
-                    break
-                events.put(("out", chunk.decode("utf-8", "replace")))
-            events.put(("done", proc.wait()))
-
-        threading.Thread(target=pump, daemon=True).start()
-
-    def run_coli(args):
-        launch([py, COLI] + args, {})
-
-    def apply():
-        if v_use_local.get():
-            if not v_model_dir.get().strip():
-                messagebox.showwarning("colibri", "Choose the model folder first.")
-                return
-            if not os.path.isfile(os.path.join(v_model_dir.get(), "config.json")) and not \
-                    messagebox.askyesno("colibri", f"{v_model_dir.get()} has no config.json. Use it anyway?"):
-                return
-        elif not v_model.get():
-            messagebox.showwarning("colibri", "Choose a model on the Model tab first.")
-            nb.select(t_model)
-            return
-        try:
-            cmd = setup_command(options(), python=py)
-        except ValueError as error:
-            messagebox.showerror("colibri", str(error))
-            return
-        r = None if v_use_local.get() else next((x for x in state["rows"] if x["id"] == v_model.get()), None)
-        if r and not r["fits"] and not messagebox.askyesno(
-                "colibri", f"{r['name']}: {r['reason']}.\n\nInstall it anyway?"):
-            return
-        if r and r["license_note"] and not messagebox.askyesno(
-                "colibri", f"{r['name']}: {r['license_note']}.\n\nContinue?"):
-            return
-        if r:
-            log_write(f"\n{r['name']}: a {r['download_gb']:.0f} GB download. It is safe to Cancel or "
-                      "close this window: Install / Apply continues where it stopped.\n")
-        launch(cmd, run_extra())
-
-    def cancel():
-        proc = state["proc"]
-        if proc and proc.poll() is None:
-            proc.terminate()
-            log_write("\n(cancelled: Install / Apply continues from where it stopped)\n")
-
+    # ---- the event loop's side
     def poll():
         try:
             while True:
@@ -827,40 +1129,56 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                 if kind == "out":
                     log_write(payload)
                 elif kind == "done":
+                    what, code = payload
                     state["proc"] = None
-                    busy(False)
-                    v_status.set("Finished." if payload == 0 else f"Stopped with code {payload}: see the output.")
+                    progress.stop()
+                    progress.configure(mode="determinate", value=1000 if code == 0 else 0)
+                    if state.pop("cancelled", False):
+                        v_status.set("Cancelled. Install again continues where it stopped.")
+                    elif code == 0:
+                        v_status.set({"setup": "Installed.", "start": "Started: the model is loading.",
+                                      "stop": "Stopped."}.get(what, "Done."))
+                    else:
+                        v_status.set("It stopped with an error: the output below says why.")
+                        show_output()
+                    busy("")
                     load_current()
                     refresh_apps()
+                elif kind == "server":
+                    cfg, ready, server = payload
+                    changed = (cfg != state["cfg"] or ready != state["ready"]
+                               or (server or {}).get("state") != (state["server"] or {}).get("state"))
+                    state["cfg"], state["ready"], state["server"] = cfg, ready, server
+                    show_server()
+                    update_plan()
+                    if changed:
+                        load_current()
+                        refresh_apps()
                 elif kind == "hw":
                     hw, rows, drive_rows = payload
                     state["hw"], state["rows"] = hw, rows
-                    hw_text.configure(state="normal")
-                    hw_text.delete("1.0", "end")
-                    hw_text.insert("1.0", setup_hw.format_report(hw))
-                    hw_text.configure(state="disabled")
+                    if hw:
+                        hw_text.configure(state="normal")
+                        hw_text.delete("1.0", "end")
+                        hw_text.insert("1.0", setup_hw.format_report(hw))
+                        hw_text.configure(state="disabled")
                     drives.delete(*drives.get_children())
                     for drive, free, total in drive_rows:
                         drives.insert("", "end", text=drive,
                                       values=(setup_hw.fmt_gb(free), setup_hw.fmt_gb(total)))
                     fill_models()
                     on_select()
-                    if v_status.get().startswith("Detecting"):
-                        v_status.set("Hardware detected.")
                 elif kind == "apps":
                     base, served, found, bridge = payload
-                    apps_state["models"], apps_state["found"] = served, found
+                    state["apps_models"], state["apps_found"] = served, found
                     app_model.configure(values=[m for m, _ in served])
                     if served and v_app_model.get() not in [m for m, _ in served]:
                         v_app_model.set(served[0][0])
                     app_server.configure(text=(f"server answering at {base}" if served else
-                                               f"no server at {base}: Start it, then Refresh")
-                                         + ("; bridge running" if bridge else ""))
+                                               f"no server at {base}")
+                                         + ("; Codex bridge running" if bridge else ""))
                     for entry in agent_connect.TOOLS:
-                        if entry["exe"]:
-                            text = "installed" if found.get(entry["id"]) else "not found"
-                        else:
-                            text = ""
+                        text = ("installed" if found.get(entry["id"]) else "not found") if entry["exe"] else ""
                         app_list.set(entry["id"], "state", text)
                     show_app()
                 elif kind == "error":
@@ -868,25 +1186,39 @@ def main():  # pragma: no cover - the window itself is exercised by hand
                     log_write(payload + "\n")
         except queue.Empty:
             pass
-        root.after(100, poll)
+        if state["proc"] is not None and state["proc_kind"] == "setup":
+            fraction, text = progress_from_state(setup_flow.read_state())
+            if fraction is None:
+                if str(progress.cget("mode")) != "indeterminate":
+                    progress.configure(mode="indeterminate")
+                    progress.start(12)
+            else:
+                if str(progress.cget("mode")) != "determinate":
+                    progress.stop()
+                    progress.configure(mode="determinate")
+                progress.configure(value=int(fraction * 1000))
+            v_status.set(text)
+        root.after(250, poll)
 
     def on_close():
         proc = state["proc"]
         if proc and proc.poll() is None:
-            if not messagebox.askyesno("colibri", "A command is still running. Stop it and close?\n"
-                                                  "(A download continues from where it stopped next time.)"):
+            if not messagebox.askyesno("colibri", "Something is still running. Stop it and close?\n"
+                                                  "(Install continues where it stopped next time.)"):
                 return
-            proc.terminate()
+            cancel()
+        state["closing"] = True
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     refresh_mode()
-    load_current()
     detect()
     app_list.selection_set("claude")
-    refresh_apps()
+    threading.Thread(target=watch_server, daemon=True).start()
+    show_server()
+    load_current()
     poll()
-    nb.select(t_cur if saved else t_model)
+    nb.select(t_apps if saved.get("status") == "ready" else t_model)
     root.mainloop()
     return 0
 

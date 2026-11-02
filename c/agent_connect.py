@@ -169,7 +169,7 @@ TOOLS = (
     {"id": "hermes", "name": "Hermes Agent", "exe": ("hermes",), "api": "OpenAI-compatible", "launch": True},
     {"id": "t3code", "name": "T3 Code", "exe": (), "api": "runs Codex or Claude Code", "launch": False,
      "bridge": True},
-    {"id": "generic", "name": "Any OpenAI-compatible app", "exe": (), "api": "OpenAI-compatible",
+    {"id": "generic", "name": "Other apps (OpenAI API)", "exe": (), "api": "OpenAI-compatible",
      "launch": False},
 )
 

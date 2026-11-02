@@ -172,5 +172,70 @@ class ConfigSummary(unittest.TestCase):
         self.assertEqual(lines["repository"], "(a folder on disk)")
 
 
+class Usability(unittest.TestCase):
+    def test_fit_words_are_plain(self):
+        self.assertEqual(configurator.fit_words("good"), "Runs well")
+        self.assertEqual(configurator.fit_words("needs-ram"), "Needs more RAM")
+        self.assertEqual(configurator.fit_words("other"), "other")
+
+    def test_progress_of_a_download(self):
+        fraction, text = configurator.progress_from_state(
+            {"phase": "download", "done": 5 * GB, "total": 20 * GB, "rate": 50e6, "eta_seconds": 300})
+        self.assertAlmostEqual(fraction, 0.25)
+        self.assertIn("Downloading the model", text)
+        self.assertIn("5 min left", text)
+
+    def test_progress_of_other_phases_is_busy(self):
+        self.assertEqual(configurator.progress_from_state({"phase": "build"}), (None, "Building the engine..."))
+        self.assertEqual(configurator.progress_from_state(None)[0], None)
+        self.assertIn("disk full", configurator.progress_from_state(
+            {"phase": "error", "message": "disk full\nmore"})[1])
+
+    def test_plan_in_words(self):
+        row = {"id": "qwen36-35b", "name": "Qwen3.6-35B-A3B", "download_gb": 23.1, "fits": True,
+               "reason": "", "license_note": ""}
+        lines, warnings = configurator.plan_lines({"models_root": "D:/m", "backend": "cuda"}, row, 500 * GB)
+        self.assertIn("Download Qwen3.6-35B-A3B: 23 GB", lines[0])
+        self.assertTrue(any("NVIDIA CUDA" in line for line in lines))
+        self.assertEqual(warnings, [])
+
+    def test_plan_warns_before_a_bad_install(self):
+        row = {"id": "qwen36-35b", "name": "Q", "download_gb": 23.1, "fits": False,
+               "reason": "needs 10 GB of RAM", "license_note": "non-commercial"}
+        _, warnings = configurator.plan_lines({"host": "0.0.0.0"}, row, 1 * GB)
+        text = " ".join(warnings)
+        for part in ("needs 10 GB of RAM", "non-commercial", "NOT ENOUGH SPACE", "0.0.0.0"):
+            self.assertIn(part, text)
+        _, warnings = configurator.plan_lines({}, None)
+        self.assertIn("Choose a model first", warnings[0])
+
+    def test_server_words(self):
+        cfg = {"status": "ready", "model": {"name": "Q"}}
+        self.assertEqual(configurator.server_words(None, None)[0], "grey")
+        self.assertEqual(configurator.server_words({"state": "ready"}, cfg), ("green", "Running: Q"))
+        self.assertEqual(configurator.server_words({"state": "loading"}, cfg)[0], "orange")
+        self.assertIn("Press Start", configurator.server_words({"state": "stopped"}, cfg)[1])
+        self.assertIn("not finished", configurator.server_words(None, {"status": "pending"})[1])
+
+    def test_why_an_app_cannot_be_opened(self):
+        import agent_connect
+        claude = agent_connect.tool("claude")
+        self.assertIn("npm install -g @anthropic-ai/claude-code",
+                      configurator.open_reason(claude, None, "win32", True))
+        self.assertIn("Start the server", configurator.open_reason(claude, "c.cmd", "win32", False))
+        self.assertIn("Windows", configurator.open_reason(claude, "c", "linux", True))
+        self.assertEqual(configurator.open_reason(claude, "c.cmd", "win32", True), "")
+        self.assertIn("instructions", configurator.open_reason(agent_connect.tool("t3code"), None, "win32", True))
+
+    def test_hardware_check_runs_in_a_child(self):
+        cmd = configurator.detect_command("D:/m", python="py")
+        self.assertEqual(cmd[0], "py")
+        self.assertTrue(cmd[1].endswith("setup_hw.py"))
+        self.assertEqual(cmd[2:], ["D:/m", "--json"])
+
+    def test_cancel_kills_the_tree(self):
+        self.assertEqual(configurator.kill_tree_command(42), ["taskkill", "/PID", "42", "/T", "/F"])
+
+
 if __name__ == "__main__":
     unittest.main()
