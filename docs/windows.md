@@ -16,6 +16,32 @@ the model with resume and opens the dashboard. Running it again starts colibri
 directly. The same from a terminal: `py -3 c\coli setup`. See
 [quickstart.md](quickstart.md#the-one-step-way).
 
+### Or with a window: CONFIGURE.bat
+
+Double-click **`CONFIGURE.bat`** (or run `py -3 c\configurator.py`) for the same
+setup in a window:
+
+- **Machine**: the CPU, RAM and GPU the setup sees, and the free space on every
+  fixed drive (double-click a drive to download models there).
+- **Model**: the catalog against this machine, what fits and why, with the
+  recommendation marked; or a model folder already on disk.
+- **Locations**: the models folder (with the space the chosen model needs), the
+  extra shard folders of a model split across drives, a Hugging Face token for
+  gated repositories (passed to that run only, never saved).
+- **Run**: backend (automatic, CUDA, Vulkan, CPU), address, port, context, and
+  whether to start the server afterwards.
+- **Current setup**: what `setup.json` holds, whether it is runnable, the
+  server's state and URLs, and the server and install logs.
+
+**Install / Apply** runs `coli setup` with those choices, and Start, Stop and
+Status run `coli start`, `coli stop` and `coli status`; each command is shown
+(and can be copied) before it runs, and its output appears in the window. The
+window keeps no settings of its own: `setup.json` stays the one configuration,
+so START-HERE.bat, `coli start` and the window always agree. A download can be
+cancelled or the window closed at any point: Install / Apply continues where it
+stopped. The window needs Tk, which the python.org installer includes ("tcl/tk
+and IDLE").
+
 ## If you downloaded a release archive, start here
 
 The archive contains **`coli.cmd`**: that is the program to run. Double-click it
