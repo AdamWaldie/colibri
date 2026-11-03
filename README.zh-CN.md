@@ -43,6 +43,28 @@ $ ./coli chat
 1. 在本页面点击 **Code**，再点击 **Download ZIP**，然后解压。
 2. 在解压后的文件夹中双击 **`START-HERE.bat`**。如果电脑上没有 Python，它会提出帮你安装。
 
+**或者使用窗口**：双击 **`CONFIGURE.bat`**。colibri 控制台用按钮完成同样的安装，之后还负责运行和连接一切：
+
+```mermaid
+flowchart TD
+    get["Get colibri<br/>release zip or git clone"] --> open["Double-click CONFIGURE.bat<br/>or the colibri shortcut"]
+    open --> ready{"Set up already?"}
+    ready -- "no" --> model["1 · Model<br/>pick from the catalog, or a folder you have"]
+    model --> where["2 · Location<br/>where the models are kept"]
+    where --> opts["3 · Options<br/>GPU, address, port, context"]
+    opts --> install["4 · Install<br/>engine + model download, resumable"]
+    install --> start
+    ready -- "yes" --> start["Start the server<br/>top bar: state and tokens/s"]
+    start --> chat["Open chat<br/>images, documents, skills"]
+    start --> apps["Connect apps<br/>Claude Code, Codex, opencode, aider, Hermes"]
+    start --> vscode["VS Code<br/>Continue, Roo Code, Cline: Write settings"]
+    start --> lan["Other computers<br/>address 0.0.0.0 + automatic API key"]
+    start -.-> mine["My models<br/>scan, move, get from Ollama or Hugging Face"]
+    start -.-> pc["This PC<br/>shortcut, updates, Tune speed"]
+```
+
+第一次打开时，它会提议在开始菜单和桌面上创建 colibri 快捷方式；之后从那里打开 colibri，无需命令行。每个选项卡的说明见 [docs/windows.md](docs/windows.md#or-with-a-window-configurebat)。
+
 **Linux**（Ubuntu 和 Debian；其他发行版也有同样的软件包，只是名称不同）
 
 ```bash

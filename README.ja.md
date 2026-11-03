@@ -43,6 +43,28 @@ $ ./coli chat
 1. このページで **Code** をクリックし、次に **Download ZIP** をクリックして、ZIP を展開します。
 2. 展開したフォルダーの中の **`START-HERE.bat`** をダブルクリックします。Python が入っていない場合は、その場でインストールすることを提案してくれます。
 
+**ウィンドウで使う場合**：代わりに **`CONFIGURE.bat`** をダブルクリックします。colibri のコンソールがボタン操作で同じセットアップを行い、その後の起動や接続もすべて受け持ちます：
+
+```mermaid
+flowchart TD
+    get["Get colibri<br/>release zip or git clone"] --> open["Double-click CONFIGURE.bat<br/>or the colibri shortcut"]
+    open --> ready{"Set up already?"}
+    ready -- "no" --> model["1 · Model<br/>pick from the catalog, or a folder you have"]
+    model --> where["2 · Location<br/>where the models are kept"]
+    where --> opts["3 · Options<br/>GPU, address, port, context"]
+    opts --> install["4 · Install<br/>engine + model download, resumable"]
+    install --> start
+    ready -- "yes" --> start["Start the server<br/>top bar: state and tokens/s"]
+    start --> chat["Open chat<br/>images, documents, skills"]
+    start --> apps["Connect apps<br/>Claude Code, Codex, opencode, aider, Hermes"]
+    start --> vscode["VS Code<br/>Continue, Roo Code, Cline: Write settings"]
+    start --> lan["Other computers<br/>address 0.0.0.0 + automatic API key"]
+    start -.-> mine["My models<br/>scan, move, get from Ollama or Hugging Face"]
+    start -.-> pc["This PC<br/>shortcut, updates, Tune speed"]
+```
+
+初回はスタートメニューとデスクトップに colibri のショートカットを作るか尋ねます。以降はそこから、コマンドラインなしで colibri を開けます。各タブの説明は [docs/windows.md](docs/windows.md#or-with-a-window-configurebat) にあります。
+
 **Linux**（Ubuntu と Debian の場合。ほかのディストリビューションにも、同じパッケージがそれぞれの名前で用意されています）
 
 ```bash
