@@ -95,8 +95,23 @@ variables, `-c` overrides (Codex) or a HERMES_HOME under the setup folder, never
 their own settings. Codex speaks only the Responses API, so it goes through
 `coli ui` on port 8790 (started for you). Each app also shows the lines to paste
 for a permanent setup; T3 Code (which runs Codex or Claude Code) and any
-OpenAI-compatible app (Continue, Cline, aider, crush, pi, OpenClaw, ...) get the
+OpenAI-compatible app (aider, crush, pi, OpenClaw, ...) get the
 base URL, key and model to enter. See [api.md](api.md#connect-a-coding-cli-or-editor).
+
+The VS Code extensions are in the list too, marked installed when VS Code, Cursor,
+VSCodium or Windsurf has them. **Write settings** sets them up:
+
+- **Continue**: adds colibri to the `models:` list in
+  `%USERPROFILE%\.continue\config.yaml`, with the context, the output length and
+  tool use for Agent mode. The old file is kept as `config.yaml.colibri-backup`, and
+  writing again replaces only colibri's own entry, which sits between two marker
+  comments. A Continue setup that still uses the older `config.json` is left
+  alone, and the entry is shown for you to add.
+- **Roo Code**: writes `roo-code-colibri.json` in the setup folder's `agents`.
+  Load it with Settings, Import in Roo Code. It adds a "colibri" provider profile
+  and keeps your others.
+- **Cline**: it has no settings file, so it shows the values to type into its
+  "OpenAI Compatible" provider.
 
 **This PC** shows the hardware report and where colibri keeps its files;
 **Details** the saved `setup.json`, the server and install logs.

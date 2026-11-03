@@ -178,5 +178,97 @@ class Launching(unittest.TestCase):
         self.assertIsNone(agent_connect.find_exe(agent_connect.tool("generic")))
 
 
+try:
+    import yaml  # only to check the YAML colibri writes parses as intended
+except ImportError:
+    yaml = None
+
+CONTINUE_DEFAULT = "name: Local Assistant\nversion: 1.0.0\nschema: v1\nmodels: []\ncontext:\n  - provider: code\n"
+CONTINUE_USER = ("name: Mine\nversion: 1.0.0\nschema: v1\nmodels:\n  # my cloud model\n"
+                 "  - name: GPT\n    provider: openai\n    model: gpt-5\n    apiKey: sk-x\nrules:\n  - be brief\n")
+
+
+class VSCodeExtensions(unittest.TestCase):
+    def models(self, text):
+        return yaml.safe_load(text)["models"] if yaml else None
+
+    def test_continue_entry_into_the_default_file(self):
+        out = agent_connect.continue_merge(CONTINUE_DEFAULT, conn())
+        self.assertIn("context:\n  - provider: code\n", out)
+        if yaml:
+            data = yaml.safe_load(out)
+            (model,) = data["models"]
+            self.assertEqual((model["provider"], model["model"], model["apiBase"]),
+                             ("openai", "qwen3.6-colibri", "http://127.0.0.1:8123/v1"))
+            self.assertEqual(model["defaultCompletionOptions"]["contextLength"], 65536)
+            self.assertIn("tool_use", model["capabilities"])
+            self.assertEqual(data["context"], [{"provider": "code"}])
+
+    def test_continue_keeps_the_users_models_and_rewrites_only_its_own(self):
+        once = agent_connect.continue_merge(CONTINUE_USER, conn())
+        twice = agent_connect.continue_merge(once, conn(model="glm-5", ctx=131072))
+        self.assertEqual(twice.count(agent_connect.CONTINUE_BEGIN), 1)
+        self.assertIn("# my cloud model", twice)
+        self.assertTrue(twice.endswith("rules:\n  - be brief\n"))
+        if yaml:
+            names = [m["name"] for m in self.models(twice)]
+            self.assertEqual(names, ["colibri glm-5", "GPT"])
+            self.assertEqual(yaml.safe_load(twice)["rules"], ["be brief"])
+
+    def test_continue_list_at_the_keys_indent_and_a_new_file(self):
+        flush = "name: x\nversion: 1\nschema: v1\nmodels:\n- name: A\n  provider: ollama\n  model: a\n"
+        out = agent_connect.continue_merge(flush, conn())
+        new = agent_connect.continue_merge(None, conn())
+        if yaml:
+            self.assertEqual([m["name"] for m in self.models(out)], ["colibri qwen3.6-colibri", "A"])
+            self.assertEqual(yaml.safe_load(new)["schema"], "v1")
+            self.assertEqual(len(self.models(new)), 1)
+        with self.assertRaises(ValueError):
+            agent_connect.continue_merge("models: [{name: a}]\n", conn())
+
+    def test_write_continue_keeps_a_backup_and_refuses_old_json(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "config.yaml").write_text(CONTINUE_USER)
+            path, backup, words = agent_connect.write_settings("continue", conn(), continue_home=folder)
+            self.assertEqual(Path(backup).read_text(), CONTINUE_USER)
+            self.assertIn(agent_connect.CONTINUE_BEGIN, Path(path).read_text())
+            self.assertIn("Continue", words)
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "config.json").write_text("{}")
+            with self.assertRaises(ValueError):
+                agent_connect.write_settings("continue", conn(), continue_home=folder)
+            self.assertFalse(Path(folder, "config.yaml").exists())
+
+    def test_roo_settings_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path, backup, _ = agent_connect.write_settings("roo", conn(), home=folder)
+            data = json.loads(Path(path).read_text())
+        profiles = data["providerProfiles"]
+        profile = profiles["apiConfigs"][profiles["currentApiConfigName"]]
+        self.assertIsNone(backup)
+        self.assertEqual((profile["apiProvider"], profile["openAiBaseUrl"], profile["openAiModelId"]),
+                         ("openai", "http://127.0.0.1:8123/v1", "qwen3.6-colibri"))
+        self.assertEqual(profile["openAiCustomModelInfo"]["contextWindow"], 65536)
+        self.assertIn("supportsPromptCache", profile["openAiCustomModelInfo"])   # required by Roo's schema
+        self.assertTrue(profile["id"])
+
+    def test_cline_and_unknown_model_are_not_written(self):
+        with self.assertRaises(ValueError):
+            agent_connect.write_settings("cline", conn())
+        with self.assertRaises(ValueError):
+            agent_connect.write_settings("roo", agent_connect.connection(CFG))
+        self.assertIn("OpenAI Compatible", agent_connect.instructions("cline", conn()))
+
+    def test_extension_found_in_any_editor_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "rooveterinaryinc.roo-cline-3.30.0"))
+            found = agent_connect.vscode_extension(("rooveterinaryinc.roo-cline-",), roots=[folder + "x", folder])
+            self.assertTrue(found.endswith("roo-cline-3.30.0"))
+            self.assertIsNone(agent_connect.vscode_extension(("continue.continue-",), roots=[folder]))
+        entry = agent_connect.tool("continue")
+        self.assertEqual(agent_connect.find_exe(entry, extension=lambda p: "/ext/" + p[0]),
+                         "/ext/continue.continue-")
+
+
 if __name__ == "__main__":
     unittest.main()

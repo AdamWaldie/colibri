@@ -395,6 +395,9 @@ def waiting_words(name, seconds):
 def open_reason(entry, exe, platform, served):
     """'' when the app can be opened from the window, else why not, in words."""
     if not entry["launch"]:
+        if entry.get("write"):
+            return ("Write settings adds colibri to this app's configuration (a copy of the old "
+                    "file is kept), or follow the instructions on the right.")
         return "Follow the instructions on the right for this app."
     if platform != "win32":
         return "Opening a terminal is for Windows; use the commands on the right."
@@ -909,6 +912,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_app_open.pack(side="left", padx=(12, 4))
     b_bridge = ttk.Button(foot, text="Start Codex bridge", command=lambda: start_bridge())
     b_bridge.pack(side="left")
+    b_app_write = ttk.Button(foot, text="Write settings", command=lambda: write_app_settings())
+    b_app_write.pack(side="left", padx=(4, 0))
     ttk.Button(foot, text="Copy instructions", command=lambda: (
         root.clipboard_clear(), root.clipboard_append(app_text.get("1.0", "end-1c")))).pack(side="left", padx=4)
     app_reason = ttk.Label(t_apps, text="", style="Hint.TLabel")
@@ -1311,6 +1316,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         b_app_open.configure(state="disabled" if reason else "normal")
         app_reason.configure(text=reason)
         b_bridge.configure(state="normal" if entry.get("bridge") else "disabled")
+        b_app_write.configure(state="normal" if entry.get("write") else "disabled")
 
     app_list.bind("<<TreeviewSelect>>", show_app)
     v_app_model.trace_add("write", show_app)
@@ -1344,6 +1350,25 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
             return
         v_status.set(f"Opened {agent_connect.tool(tool_id)['name']} in a new window.")
         log_write(f"\nopened {agent_connect.tool(tool_id)['name']} ({script})\n")
+
+    def write_app_settings():
+        sel = app_list.selection()
+        if not sel or not agent_connect.tool(sel[0]).get("write"):
+            return
+        entry = agent_connect.tool(sel[0])
+        if not messagebox.askyesno("colibri", f"Write colibri into {entry['name']}'s settings?\n\n"
+                                              "A copy of an existing file is kept beside it."):
+            return
+        try:
+            path, backup, words = agent_connect.write_settings(sel[0], app_conn())
+        except (ValueError, OSError) as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        root.clipboard_clear()
+        root.clipboard_append(path)
+        log_write(f"\nwrote {path}" + (f" (the old one: {backup})" if backup else "") + "\n")
+        v_status.set(f"Wrote {entry['name']}'s settings.")
+        messagebox.showinfo("colibri", words + "\n\n(The file's path is on the clipboard.)")
 
     def start_bridge():
         conn = app_conn()
@@ -1947,7 +1972,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                                                f"no server at {base}")
                                          + ("; Codex bridge running" if bridge else ""))
                     for entry in agent_connect.TOOLS:
-                        text = ("installed" if found.get(entry["id"]) else "not found") if entry["exe"] else ""
+                        text = (("installed" if found.get(entry["id"]) else "not found")
+                                if entry["exe"] or entry.get("ext") else "")
                         app_list.set(entry["id"], "state", text)
                     show_app()
                     fill_apps_menu()

@@ -181,6 +181,149 @@ def claude_env(conn):
     return env
 
 
+# ---------------------------------------------------------------- VS Code extensions
+#
+# Continue reads ~/.continue/config.yaml (docs.continue.dev/reference): colibri goes in
+# as one entry of its `models:` list, between two marker comments, so writing again
+# replaces that entry and nothing else; the file is copied aside first. Roo Code keeps
+# its providers in VS Code's own storage, but imports a settings file (Settings,
+# Import; or the roo-cline.autoImportSettingsPath setting) and merges its profiles
+# with the ones it has (src/core/config/importExport.ts): colibri writes that file.
+# Cline has no file to write: its recipe is the values to type in.
+
+CONTINUE_BEGIN = "# colibri begin: written by the colibri configurator, which rewrites this entry"
+CONTINUE_END = "# colibri end"
+ROO_PROFILE = "colibri"
+
+
+def continue_dir():
+    return os.environ.get("CONTINUE_GLOBAL_DIR") or os.path.join(os.path.expanduser("~"), ".continue")
+
+
+def continue_entry(conn, indent="  "):
+    """colibri as one item of Continue's `models:` list, at `indent`, markers included.
+    JSON strings are YAML double-quoted strings: nothing in a value can break it."""
+    inner = indent + "  "
+    q = json.dumps
+    lines = [CONTINUE_BEGIN,
+             f"- name: {q('colibri ' + conn['model'])}",
+             f"{inner}provider: openai",
+             f"{inner}model: {q(conn['model'])}",
+             f"{inner}apiBase: {q(conn['v1'])}",
+             f"{inner}apiKey: {q(conn['key'])}",
+             f"{inner}roles: [chat, edit, apply]",
+             f"{inner}capabilities: [tool_use]",
+             f"{inner}defaultCompletionOptions:",
+             f"{inner}  contextLength: {conn['ctx']}",
+             f"{inner}  maxTokens: {_out_tokens(conn['ctx'])}",
+             CONTINUE_END]
+    return "\n".join(indent + line if not line.startswith(" ") else line for line in lines) + "\n"
+
+
+def continue_merge(text, conn):
+    """Continue's config.yaml with colibri's entry in it: the old colibri entry replaced,
+    or a new one first in `models:`, every other line as it was. ValueError when the
+    file's `models:` is not a list this can safely add to (flow style, say)."""
+    lines = (text or "").splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    begin = next((i for i, line in enumerate(lines) if line.strip() == CONTINUE_BEGIN), None)
+    if begin is not None:
+        end = next((i for i in range(begin, len(lines)) if lines[i].strip() == CONTINUE_END), None)
+        if end is None:
+            raise ValueError("the colibri entry in config.yaml has lost its end marker: remove it by hand")
+        indent = lines[begin][:len(lines[begin]) - len(lines[begin].lstrip())]
+        return "".join(lines[:begin]) + continue_entry(conn, indent) + "".join(lines[end + 1:])
+    key = next((i for i, line in enumerate(lines) if re.match(r"models\s*:", line)), None)
+    if key is None:
+        body = "".join(lines)
+        if not body.strip():
+            body = "name: Local Assistant\nversion: 1.0.0\nschema: v1\n"
+        return body + "models:\n" + continue_entry(conn)
+    rest = lines[key].split(":", 1)[1].split("#", 1)[0].strip()
+    if rest == "[]":
+        return "".join(lines[:key]) + "models:\n" + continue_entry(conn) + "".join(lines[key + 1:])
+    if rest:
+        raise ValueError("config.yaml lists its models on one line ([...]): add colibri's entry by hand")
+    indent = "  "
+    for line in lines[key + 1:]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- ") or stripped == "-":
+            indent = line[:len(line) - len(line.lstrip())]
+        break
+    return "".join(lines[:key + 1]) + continue_entry(conn, indent) + "".join(lines[key + 1:])
+
+
+def roo_settings(conn):
+    """A Roo Code settings file holding one "colibri" provider profile (OpenAI
+    Compatible), made the current one. Importing it keeps the profiles Roo has."""
+    return {"providerProfiles": {
+        "currentApiConfigName": ROO_PROFILE,
+        "apiConfigs": {ROO_PROFILE: {
+            "id": "colibri-local", "apiProvider": "openai",
+            "openAiBaseUrl": conn["v1"], "openAiApiKey": conn["key"], "openAiModelId": conn["model"],
+            "openAiCustomModelInfo": {"contextWindow": conn["ctx"], "maxTokens": _out_tokens(conn["ctx"]),
+                                      "supportsImages": False, "supportsPromptCache": False}}}}}
+
+
+def roo_settings_path(home=None):
+    return os.path.join(home or agents_home(), "roo-code-colibri.json")
+
+
+def write_settings(tool_id, conn, home=None, continue_home=None):
+    """Write colibri into the app's configuration. Returns (path written, backup or
+    None, a sentence for the user)."""
+    if not MODEL_RE.match(conn["model"]):
+        raise ValueError("the server's model id is not known yet: start the server, then Refresh")
+    if tool_id == "continue":
+        folder = continue_home or continue_dir()
+        path = os.path.join(folder, "config.yaml")
+        if not os.path.exists(path) and os.path.exists(os.path.join(folder, "config.json")):
+            raise ValueError("Continue here still uses the older config.json: add the model shown "
+                             "here to it by hand, or let Continue move it to config.yaml first")
+        old = None
+        if os.path.exists(path):
+            with open(path, encoding="utf-8") as handle:
+                old = handle.read()
+        new = continue_merge(old, conn)
+        os.makedirs(folder, exist_ok=True)
+        backup = None
+        if old is not None:
+            backup = path + ".colibri-backup"
+            with open(backup, "w", encoding="utf-8", newline="") as handle:
+                handle.write(old)
+        with open(path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(new)
+        return path, backup, (f"Added colibri {conn['model']} to Continue ({path}). Pick it in "
+                              "Continue's model menu; Continue reloads the file by itself.")
+    if tool_id == "roo":
+        path = roo_settings_path(home)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(roo_settings(conn), handle, indent=2)
+        return path, None, (f"Wrote {path}. In Roo Code: Settings, Import, pick that file. It adds "
+                            "a 'colibri' profile and keeps your others.")
+    raise ValueError(f"{tool(tool_id)['name']} has no settings colibri writes: follow its instructions")
+
+
+def vscode_extension(prefixes, roots=None):
+    """The installed VS Code (or Cursor, VSCodium) extension folder starting with one
+    of `prefixes` (publisher.name-), or None."""
+    home = os.path.expanduser("~")
+    for root in roots or [os.path.join(home, d, "extensions") for d in (".vscode", ".cursor", ".vscode-oss",
+                                                                         ".windsurf")]:
+        try:
+            names = sorted(os.listdir(root), reverse=True)
+        except OSError:
+            continue
+        for name in names:
+            if name.lower().startswith(prefixes):
+                return os.path.join(root, name)
+    return None
+
+
 def env_lines(env, shell="cmd", persist=False):
     """Variables as lines for cmd (`set`), PowerShell (`$env:`), or persisted for new
     windows (`setx`, which takes effect in terminals opened afterwards)."""
@@ -205,6 +348,12 @@ TOOLS = (
     {"id": "opencode", "name": "opencode", "exe": ("opencode",), "api": "OpenAI-compatible", "launch": True},
     {"id": "hermes", "name": "Hermes Agent", "exe": ("hermes",), "api": "OpenAI-compatible", "launch": True},
     {"id": "aider", "name": "aider", "exe": ("aider",), "api": "OpenAI-compatible", "launch": True},
+    {"id": "continue", "name": "Continue (VS Code)", "exe": (), "ext": ("continue.continue-",),
+     "api": "OpenAI-compatible", "launch": False, "write": True},
+    {"id": "roo", "name": "Roo Code (VS Code)", "exe": (), "ext": ("rooveterinaryinc.roo-cline-",),
+     "api": "OpenAI-compatible", "launch": False, "write": True},
+    {"id": "cline", "name": "Cline (VS Code)", "exe": (), "ext": ("saoudrizwan.claude-dev-",),
+     "api": "OpenAI-compatible", "launch": False},
     {"id": "t3code", "name": "T3 Code", "exe": (), "api": "runs Codex or Claude Code", "launch": False,
      "bridge": True},
     {"id": "generic", "name": "Other apps (OpenAI API)", "exe": (), "api": "OpenAI-compatible",
@@ -219,11 +368,14 @@ def tool(tool_id):
     raise KeyError(tool_id)
 
 
-def find_exe(entry, which=shutil.which):
+def find_exe(entry, which=shutil.which, extension=None):
+    """The app's program, or for a VS Code extension its folder; None when not found."""
     for name in entry["exe"]:
         found = which(name)
         if found:
             return found
+    if entry.get("ext"):
+        return (extension or vscode_extension)(entry["ext"])
     return None
 
 
@@ -289,6 +441,40 @@ def instructions(tool_id, conn):
             "(your ~/.hermes is not changed). Hermes needs a context of at least 64,000 tokens: "
             "set Context to 65536 or more on the Run tab and Install / Apply.\n\n"
             "Permanently: %USERPROFILE%\\.hermes\\config.yaml\n\n" + hermes_yaml(conn))
+    if tool_id == "continue":
+        return head + (
+            "\nContinue (VS Code, JetBrains) reads %USERPROFILE%\\.continue\\config.yaml. 'Write "
+            "settings' adds colibri to its models: a copy of the file is kept beside it "
+            "(config.yaml.colibri-backup) and writing again replaces only colibri's own entry. Then "
+            "pick it in Continue's model menu (chat, edit and Agent mode).\n\n"
+            "By hand: put this under models: in config.yaml\n\n" + continue_entry(conn) +
+            "\nAgent mode runs tools through the model, so it needs one that calls tools well "
+            "(Qwen3-Coder, Qwen3.6, GLM) and a context of 32768 or more.")
+    if tool_id == "roo":
+        return head + (
+            "\nRoo Code keeps its providers inside VS Code, but imports a settings file. 'Write "
+            f"settings' writes {roo_settings_path()}; then in Roo Code: the gear (Settings), "
+            "Import, pick that file. It adds a profile called 'colibri' and makes it the current "
+            "one; your other profiles stay. (Or set roo-cline.autoImportSettingsPath to the file "
+            "in VS Code's settings, and Roo Code loads it each time it starts.)\n\n"
+            "By hand: Settings, API Provider 'OpenAI Compatible':\n"
+            f"  Base URL   {v1}\n  API Key    {key}\n  Model      {model}\n"
+            f"  Context window  {ctx}\n\n"
+            "Roo Code's instructions and tools take 10-15k tokens before your request: give the "
+            "server a context of 65536 or more ('Set up for coding apps') and a model that calls "
+            "tools well.")
+    if tool_id == "cline":
+        return head + (
+            "\nCline keeps its settings inside VS Code and has nothing to import, so type these "
+            "in once: the Cline panel, the gear (Settings), API Provider 'OpenAI Compatible':\n\n"
+            f"  Base URL        {v1}\n"
+            f"  API Key         {key}\n"
+            f"  Model ID        {model}\n"
+            f"  Model configuration: context window {ctx}, max output {_out_tokens(ctx)}, "
+            "images off\n\n"
+            "Done. Cline's instructions and tools take 10-15k tokens before your request: give the "
+            "server a context of 65536 or more ('Set up for coding apps') and a model that calls "
+            "tools well (Qwen3-Coder, Qwen3.6, GLM).")
     if tool_id == "t3code":
         return head + (
             "\nT3 Code is a desktop app that runs the Codex CLI (and Claude Code) for you, so it "
