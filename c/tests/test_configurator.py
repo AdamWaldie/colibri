@@ -270,5 +270,57 @@ class OpenAppMenu(unittest.TestCase):
         self.assertIn("Codex CLI", configurator.waiting_words("Codex CLI", 0))
 
 
+class CodingContext(unittest.TestCase):
+    """Set up for coding apps: the largest of 131072 / 65536 whose conversation state
+    fits in 40% of the memory there is."""
+    GiB = 10 ** 9
+
+    def fake(self, per_token, max_context=262144, family="qwen36"):
+        from types import SimpleNamespace as NS
+        resolved = NS(descriptor=NS(id=family, display_name="Fake", limits=NS(max_context=max_context)))
+        geometry = lambda r, step: NS(context_state_bytes=step * per_token, workspace_bytes=0)  # noqa: E731
+        return (lambda path: resolved), geometry
+
+    def test_131k_when_it_fits(self):
+        resolve, geometry = self.fake(per_token=50_000)            # 131072 tokens: 6.6 GB
+        ctx, words = configurator.coding_context("m", available=32 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertEqual(ctx, 131072)
+        self.assertIn("131,072 tokens", words)
+
+    def test_65k_when_only_that_fits(self):
+        resolve, geometry = self.fake(per_token=50_000)            # 6.6 GB > 40% of 12 GB; 3.3 GB fits
+        self.assertEqual(configurator.coding_context("m", available=12 * self.GiB,
+                                                     resolve=resolve, geometry=geometry)[0], 65536)
+
+    def test_nothing_fits_suggests_a_smaller_model(self):
+        resolve, geometry = self.fake(per_token=200_000)           # 65536 tokens: 13 GB
+        ctx, words = configurator.coding_context("m", available=16 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertIsNone(ctx)
+        self.assertIn("smaller model", words)
+
+    def test_a_model_that_cannot_reach_65k(self):
+        resolve, geometry = self.fake(per_token=1, max_context=32768)
+        ctx, words = configurator.coding_context("m", available=64 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertIsNone(ctx)
+        self.assertIn("32,768", words)
+
+    def test_a_family_capped_at_65k_gets_65k(self):
+        resolve, geometry = self.fake(per_token=1, max_context=65536)
+        self.assertEqual(configurator.coding_context("m", available=64 * self.GiB,
+                                                     resolve=resolve, geometry=geometry)[0], 65536)
+
+    def test_the_real_planner_on_a_tiny_model(self):
+        here = os.path.join(configurator.HERE, "mimo_tiny")
+        ctx, words = configurator.coding_context(here, available=64 * self.GiB)
+        self.assertEqual(ctx, 131072)
+        self.assertIn("conversation memory", words)
+
+    def test_advice(self):
+        self.assertIn("Start the server", configurator.coding_advice(None))
+        self.assertIn("too small", configurator.coding_advice(32768))
+        self.assertIn("enough", configurator.coding_advice(65536))
+        self.assertIn("ready", configurator.coding_advice(131072))
+
+
 if __name__ == "__main__":
     unittest.main()

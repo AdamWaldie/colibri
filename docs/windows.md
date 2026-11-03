@@ -65,6 +65,13 @@ Codex bridge is started when needed, and the app opens in a terminal in your pro
 folder, already connected. The folder is asked the first time and remembered (change
 it at the bottom of the same menu). Apps that are not installed are listed greyed.
 
+**Set up for coding apps** (top of Connect apps) gives Claude Code and Codex the
+context they need: it shows the server's context and whether it is enough (65,536
+tokens at least), and on a press works out, with colibri's own planner for this
+model, the largest of 131,072 and 65,536 whose conversation memory fits in 40% of the
+memory there is, sets it (`coli setup --ctx`, no rebuild, no download) and restarts
+the server. When even 65,536 does not fit, it says so and suggests a smaller model.
+
 **Connect apps** uses the running model from a coding app, the way a local
 Ollama is used. The model id and context come from the server's `/v1/models`.
 Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a

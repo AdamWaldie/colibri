@@ -316,6 +316,59 @@ def server_words(server, cfg):
     return "grey", f"Stopped: {name} is set up. Press Start"
 
 
+CODING_STEPS = (131072, 65536)      # what Claude Code and Codex want, then what they need
+CODING_MIN = 65536
+CODING_SHARE = 0.40                 # of the memory there is, for the conversation state
+
+
+def coding_context(model_dir, available=None, resolve=None, geometry=None):
+    """(context, words) for coding apps on this model and this PC: 131072 when its
+    conversation state fits in CODING_SHARE of the memory there is (Claude Code can
+    then compact by itself), else 65536 (the least Claude Code and Codex work with),
+    else (None, why and what to do instead). The state is the model's own, from the
+    planner colibri sizes its server with (resource_plan)."""
+    import family_registry
+    import resource_plan
+    resolve = resolve or family_registry.resolve_model
+    geometry = geometry or family_registry.planner_geometry
+    if available is None:
+        available = resource_plan.memory_available()
+    resolved = resolve(model_dir)
+    family = resolved.descriptor
+    limit = family.limits.max_context
+    if limit < CODING_MIN:
+        return None, (f"{family.display_name} holds at most {limit:,} tokens; Claude Code and Codex "
+                      f"need {CODING_MIN:,}. Choose a model with a longer context.")
+    need_at = {}
+    for step in CODING_STEPS:
+        if step > limit:
+            continue
+        g = geometry(resolved, step)
+        need = g.context_state_bytes + (g.workspace_bytes
+                                        if family.id in resource_plan.CHAT_CONTEXT_WORKSPACE else 0)
+        need_at[step] = need
+        if need <= CODING_SHARE * available:
+            return step, (f"{step:,} tokens: {setup_hw.fmt_gb(need)} of conversation memory, of "
+                          f"{setup_hw.fmt_gb(available)} available")
+    need = need_at.get(CODING_MIN)
+    return None, (f"{CODING_MIN:,} tokens would take {setup_hw.fmt_gb(need)} of conversation memory, "
+                  f"more than this PC can spare ({setup_hw.fmt_gb(available)} available). A smaller "
+                  "model (Qwen3-Coder-30B, Qwen3.6-35B) suits coding apps here.")
+
+
+def coding_advice(ctx):
+    """One line on whether the server's context suits coding apps."""
+    if not ctx:
+        return "Start the server to see its context."
+    if ctx < CODING_MIN:
+        return (f"Context {ctx:,} tokens: too small for Claude Code and Codex (they need "
+                f"{CODING_MIN:,}). Press Set up for coding apps.")
+    if ctx < max(CODING_STEPS):
+        return (f"Context {ctx:,} tokens: enough for Claude Code and Codex. "
+                f"{max(CODING_STEPS):,} would also let Claude Code compact by itself.")
+    return f"Context {ctx:,} tokens: ready for coding apps."
+
+
 def app_menu_items(found, platform):
     """[(tool id, label, enabled)] for the top bar's Open app menu: every app the
     window can open, the ones not installed (or off Windows) shown but greyed."""
@@ -811,6 +864,12 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
               text="Like a local Ollama: while the server runs, these apps can use it instead of a cloud "
                    "model. Pick an app; Open in terminal starts it in your project already connected, "
                    "without changing its own settings.").pack(anchor="w")
+    coding_row = ttk.Frame(t_apps)
+    coding_row.pack(fill="x", pady=(6, 0))
+    coding_info = ttk.Label(coding_row, text="", wraplength=760, justify="left")
+    coding_info.pack(side="left", fill="x", expand=True)
+    b_coding = ttk.Button(coding_row, text="Set up for coding apps", command=lambda: set_up_coding())
+    b_coding.pack(side="right")
     head = ttk.Frame(t_apps)
     head.pack(fill="x", pady=(8, 0))
     ttk.Label(head, text="Model").pack(side="left")
@@ -1271,6 +1330,46 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
 
+    # Set up for coding apps: the context Claude Code and Codex need
+    def set_up_coding():
+        cfg = state["cfg"] or {}
+        if not cfg.get("model_dir") or not state["ready"]:
+            messagebox.showinfo("colibri", "Set up a model first: steps 1 to 4, or My models.")
+            nb.select(t_model)
+            return
+        coding_info.configure(text="Working out the context this PC can give the model...")
+
+        def work():
+            try:
+                events.put(("coding", coding_context(cfg["model_dir"])))
+            except Exception as error:  # an unreadable model: say so, keep the window
+                traceback.print_exc(file=sys.stderr)
+                events.put(("coding", (None, f"Could not size the context: {error}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_coding(ctx, words):
+        current = int((state["cfg"] or {}).get("ctx") or 0)
+        if ctx is None:
+            coding_info.configure(text=words)
+            messagebox.showwarning("colibri", words)
+            return
+        if current == ctx:
+            coding_info.configure(text=f"Already set: {words}.")
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", f"Set the context to {words}?\n\nClaude Code and Codex then have room for "
+                           "their instructions and tools, and the setup keeps it for every start."
+                           + ("\n\nThe server restarts to use it." if running else "")):
+            coding_info.configure(text=coding_advice(current or None))
+            return
+        v_ctx.set(str(ctx))
+        restart = (lambda: launch([py, COLI, "stop"], {}, "stop",
+                                  then=lambda: run_coli(["start", "--background", "--no-browser"], "start"))) \
+            if running else None
+        launch([py, COLI, "setup", "--yes", "--ctx", str(ctx), "--no-start"], {}, "setup", then=restart)
+
     # Open app: one click from the top bar
     def fill_apps_menu():
         apps_menu.delete(0, "end")
@@ -1659,6 +1758,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         refresh_apps()
                     elif not state.get("app_wait_cancel"):
                         v_status.set("The model did not load within an hour: see Details, Server log.")
+                elif kind == "coding":
+                    apply_coding(*payload)
                 elif kind == "resolved":
                     show_plan(*payload)
                 elif kind == "library":
@@ -1723,6 +1824,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         app_list.set(entry["id"], "state", text)
                     show_app()
                     fill_apps_menu()
+                    served_ctx = dict(served).get(v_app_model.get()) if served else None
+                    coding_info.configure(text=coding_advice(served_ctx))
                 elif kind == "error":
                     v_status.set(payload)
                     log_write(payload + "\n")
