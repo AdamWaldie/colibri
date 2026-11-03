@@ -253,5 +253,22 @@ class LibraryHelpers(unittest.TestCase):
             self.assertEqual(configurator.load_prefs(path), {})
 
 
+class OpenAppMenu(unittest.TestCase):
+    def test_installed_apps_are_offered_the_others_greyed(self):
+        items = configurator.app_menu_items({"claude": "C:/npm/claude.cmd", "aider": "C:/py/aider.exe"}, "win32")
+        by = {tool_id: (label, enabled) for tool_id, label, enabled in items}
+        self.assertEqual(by["claude"], ("Claude Code", True))
+        self.assertEqual(by["aider"], ("aider", True))
+        self.assertEqual(by["codex"], ("Codex CLI: not installed", False))
+        self.assertNotIn("t3code", by)                          # a desktop app: instructions only
+        self.assertNotIn("generic", by)
+        self.assertTrue(all(not enabled for _, _, enabled in configurator.app_menu_items(
+            {"claude": "/usr/bin/claude"}, "linux")))
+
+    def test_waiting_words(self):
+        self.assertIn("2:05", configurator.waiting_words("Codex CLI", 125))
+        self.assertIn("Codex CLI", configurator.waiting_words("Codex CLI", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

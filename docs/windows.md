@@ -58,6 +58,13 @@ copies it to another one with progress, checks every file's size and only then
 removes the original; Cancel leaves it where it was, and the setup follows a
 moved model.
 
+**Open app** (top right, on every page) opens Claude Code, Codex, opencode, Hermes
+Agent or aider on the local model in one click: the server is started if it is
+stopped, the window waits until the model has loaded (Cancel stops waiting), the
+Codex bridge is started when needed, and the app opens in a terminal in your project
+folder, already connected. The folder is asked the first time and remembered (change
+it at the bottom of the same menu). Apps that are not installed are listed greyed.
+
 **Connect apps** uses the running model from a coding app, the way a local
 Ollama is used. The model id and context come from the server's `/v1/models`.
 Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a

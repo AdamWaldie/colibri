@@ -66,7 +66,8 @@ PHASE_WORDS = {"starting": "Checking this PC", "build": "Building the engine",
 INSTALL_HINTS = {"claude": "npm install -g @anthropic-ai/claude-code",
                  "codex": "npm install -g @openai/codex",
                  "opencode": "npm install -g opencode-ai",
-                 "hermes": "see Hermes Agent's install guide"}
+                 "hermes": "see Hermes Agent's install guide",
+                 "aider": "python -m pip install aider-install, then aider-install"}
 
 
 # ---------------------------------------------------------------- pure logic (tested)
@@ -315,6 +316,27 @@ def server_words(server, cfg):
     return "grey", f"Stopped: {name} is set up. Press Start"
 
 
+def app_menu_items(found, platform):
+    """[(tool id, label, enabled)] for the top bar's Open app menu: every app the
+    window can open, the ones not installed (or off Windows) shown but greyed."""
+    items = []
+    for entry in agent_connect.TOOLS:
+        if not entry["launch"]:
+            continue
+        if platform != "win32":
+            items.append((entry["id"], f"{entry['name']} (opens from Windows)", False))
+        elif found.get(entry["id"]):
+            items.append((entry["id"], entry["name"], True))
+        else:
+            items.append((entry["id"], f"{entry['name']}: not installed", False))
+    return items
+
+
+def waiting_words(name, seconds):
+    minutes, rest = divmod(int(seconds), 60)
+    return f"Loading the model for {name}: {minutes}:{rest:02d} (large models take minutes)"
+
+
 def open_reason(entry, exe, platform, served):
     """'' when the app can be opened from the window, else why not, in words."""
     if not entry["launch"]:
@@ -538,6 +560,12 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_start.pack(side="right", padx=4)
     b_chat = ttk.Button(strip, text="Open chat", command=lambda: open_dashboard())
     b_chat.pack(side="right")
+    # Claude Code, Codex, opencode... on the local model, in one click: the server is
+    # started and waited for when needed, then the app opens in the project folder.
+    b_apps = ttk.Menubutton(strip, text="Open app")
+    apps_menu = tk.Menu(b_apps, tearoff=False)
+    b_apps["menu"] = apps_menu
+    b_apps.pack(side="right", padx=(0, 8))
     ttk.Separator(root).pack(fill="x")
 
     # ---- bottom: progress, status, output (packed before the tabs so it keeps its room)
@@ -547,11 +575,12 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     bar_row.pack(fill="x")
     progress = ttk.Progressbar(bar_row, mode="determinate", maximum=1000, length=240)
     progress.pack(side="left")
-    ttk.Label(bar_row, textvariable=v_status).pack(side="left", padx=10, fill="x", expand=True)
+    # the buttons first: a long status line is cut, never the buttons
     b_toggle = ttk.Button(bar_row, text="Show output", command=lambda: toggle_output())
     b_toggle.pack(side="right")
     b_cancel = ttk.Button(bar_row, text="Cancel", command=lambda: cancel(), state="disabled")
     b_cancel.pack(side="right", padx=4)
+    ttk.Label(bar_row, textvariable=v_status).pack(side="left", padx=10, fill="x", expand=True)
     out_frame = ttk.Frame(bottom)
     log = tk.Text(out_frame, height=12, wrap="none", font=("Consolas", 9), background="#111111",
                   foreground="#dddddd", insertbackground="#dddddd")
@@ -1101,7 +1130,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
 
     def busy(kind):
         state["proc_kind"] = kind
-        b_cancel.configure(state="normal" if kind else "disabled")
+        b_cancel.configure(state="normal" if kind or state.get("app_wait") else "disabled")
         show_server()
         update_plan()
 
@@ -1162,6 +1191,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         launch(cmd, run_extra(), "setup")
 
     def cancel():
+        if state.get("app_wait"):
+            state["app_wait_cancel"] = True
+            v_status.set("Stopped waiting (the server keeps starting in the background).")
+            return
         if state.get("moving"):
             state["move_cancel"] = True
             v_status.set("Cancelling the move...")
@@ -1237,6 +1270,99 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
             return
         v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
+
+    # Open app: one click from the top bar
+    def fill_apps_menu():
+        apps_menu.delete(0, "end")
+        for tool_id, label, enabled in app_menu_items(state["apps_found"], sys.platform):
+            apps_menu.add_command(label=label, state="normal" if enabled else "disabled",
+                                  command=lambda t=tool_id: one_click(t))
+        apps_menu.add_separator()
+        folder = lib_state["prefs"].get("project_folder")
+        apps_menu.add_command(label=f"Project folder: {folder or 'asked the first time'}...",
+                              command=lambda: project_folder(ask=True))
+
+    def project_folder(ask=False):
+        folder = lib_state["prefs"].get("project_folder")
+        if ask or not folder or not os.path.isdir(folder):
+            chosen = filedialog.askdirectory(title="The project folder the app opens in",
+                                             initialdir=folder if folder and os.path.isdir(folder)
+                                             else os.path.expanduser("~"))
+            if not chosen:
+                return None
+            folder = os.path.normpath(chosen)
+            lib_state["prefs"]["project_folder"] = folder
+            save_prefs(lib_state["prefs"])
+            fill_apps_menu()
+        v_app_folder.set(folder)
+        return folder
+
+    def one_click(tool_id):
+        name = agent_connect.tool(tool_id)["name"]
+        if state.get("app_wait"):
+            messagebox.showinfo("colibri", "Already waiting for the model to load.")
+            return
+        if not state["cfg"] or not state["ready"]:
+            messagebox.showinfo("colibri", f"Set up a model before opening {name}: steps 1 to 4, "
+                                           "or My models.")
+            nb.select(t_model)
+            return
+        if not project_folder():
+            return
+        if state["apps_models"] and (state["server"] or {}).get("state") == "ready":
+            finish_open(tool_id)
+            return
+        if (state["server"] or {}).get("state") not in ("ready", "loading"):
+            if state["proc"] is not None:
+                messagebox.showinfo("colibri", "Something is already running: wait for it, or Cancel.")
+                return
+            run_coli(["start", "--background", "--no-browser"], "start")
+        wait_for_model(tool_id)
+
+    def wait_for_model(tool_id):
+        state["app_wait"], state["app_wait_cancel"] = tool_id, False
+        b_cancel.configure(state="normal")
+        progress.configure(mode="indeterminate")
+        progress.start(12)
+        cfg, conn, key, started = dict(state["cfg"]), app_conn(), v_app_key.get().strip(), time.time()
+
+        def work():
+            while not state.get("app_wait_cancel") and not state["closing"]:
+                ready = False
+                try:
+                    ready = setup_flow.server_status(cfg).get("state") == "ready"
+                except Exception:  # still starting: no answer yet
+                    pass
+                served = agent_connect.served_models(conn["base"], key) if ready else []
+                if served:
+                    events.put(("app_ready", (tool_id, served)))
+                    return
+                if time.time() - started > 3600:
+                    break
+                events.put(("app_wait", (tool_id, time.time() - started)))
+                time.sleep(2)
+            events.put(("app_ready", (tool_id, None)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def finish_open(tool_id):
+        entry = agent_connect.tool(tool_id)
+        exe = state["apps_found"].get(tool_id) or agent_connect.find_exe(entry)
+        if not exe:
+            messagebox.showinfo("colibri", open_reason(entry, None, sys.platform, True))
+            return
+        if not v_app_model.get() and state["apps_models"]:
+            v_app_model.set(state["apps_models"][0][0])
+        conn = app_conn()
+        try:
+            if entry.get("bridge") and agent_connect.start_bridge(conn, python=py):
+                log_write(f"\nstarted the Codex bridge (coli ui) on {conn['bridge']}\n")
+            script = agent_connect.open_in_terminal(tool_id, conn, v_app_folder.get(), exe)
+        except (ValueError, OSError) as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        v_status.set(f"Opened {entry['name']} on {conn['model']} in {v_app_folder.get()}.")
+        log_write(f"\nopened {entry['name']} ({script})\n")
 
     # My models
     def scan_models():
@@ -1518,6 +1644,21 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         scan_models()
                     if then and code == 0 and not was_cancelled:
                         then()
+                elif kind == "app_wait":
+                    tool_id, seconds = payload
+                    v_status.set(waiting_words(agent_connect.tool(tool_id)["name"], seconds))
+                elif kind == "app_ready":
+                    tool_id, served = payload
+                    state["app_wait"] = None
+                    progress.stop()
+                    progress.configure(mode="determinate", value=1000 if served else 0)
+                    busy(state["proc_kind"] if state["proc"] is not None else "")
+                    if served:
+                        state["apps_models"] = served
+                        finish_open(tool_id)
+                        refresh_apps()
+                    elif not state.get("app_wait_cancel"):
+                        v_status.set("The model did not load within an hour: see Details, Server log.")
                 elif kind == "resolved":
                     show_plan(*payload)
                 elif kind == "library":
@@ -1581,6 +1722,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         text = ("installed" if found.get(entry["id"]) else "not found") if entry["exe"] else ""
                         app_list.set(entry["id"], "state", text)
                     show_app()
+                    fill_apps_menu()
                 elif kind == "error":
                     v_status.set(payload)
                     log_write(payload + "\n")
