@@ -44,6 +44,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import agent_connect  # noqa: E402
+import model_fetch  # noqa: E402
 import model_library  # noqa: E402
 import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
@@ -362,6 +363,23 @@ def config_summary(cfg):
 
 LIBRARY_WORDS = {"yes": "Ready", "incomplete": "Download not finished", "import": "After Import",
                  "no": "No"}
+
+
+def fetch_summary(plan, models_root):
+    """What Look up found, in words: (text, can download)."""
+    chosen = plan["chosen"]
+    size = setup_hw.fmt_gb(chosen["size"])
+    if not plan["supported"]:
+        return (f"{plan['name']}: {plan['why']}. colibri can't run it, so it isn't offered "
+                "(colibri's engines serve large mixture-of-experts families such as Qwen3 MoE, GLM, "
+                "DeepSeek V4)."), False
+    free = setup_hw.disk_free(models_root)
+    text = (f"{plan['name']} ({chosen['label']}, {size} download): {plan['why']}.\n"
+            f"Saved in {model_fetch.download_dir(plan['name'], models_root)}, "
+            f"imported as {model_fetch.import_dir(plan['name'], chosen, models_root)}.")
+    if free is not None and free < chosen["size"] + (1 << 30):
+        return text + f"\nNOT ENOUGH SPACE there: {setup_hw.fmt_gb(free)} free.", False
+    return text, True
 
 
 def library_words(runs):
@@ -703,6 +721,26 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                    "Hugging Face cache. A GGUF runs in colibri after Import (the file stays where it is) "
                    "when its architecture is one colibri's engines serve; the others say why not."
               ).pack(anchor="w")
+    get_box = ttk.LabelFrame(t_lib, text="Get a new model", padding=8)
+    get_box.pack(fill="x", pady=(8, 0))
+    v_get = tk.StringVar(value="")
+    v_variant = tk.StringVar(value="")
+    get_row = ttk.Frame(get_box)
+    get_row.pack(fill="x")
+    get_entry = ttk.Entry(get_row, textvariable=v_get)
+    get_entry.pack(side="left", fill="x", expand=True)
+    b_lookup = ttk.Button(get_row, text="Look up", command=lambda: look_up())
+    b_lookup.pack(side="left", padx=6)
+    get_variant = ttk.Combobox(get_row, textvariable=v_variant, width=22, state="disabled")
+    get_variant.pack(side="left")
+    b_fetch = ttk.Button(get_row, text="Download and use", state="disabled", command=lambda: fetch_model())
+    b_fetch.pack(side="left", padx=6)
+    get_info = ttk.Label(get_box, style="Hint.TLabel", wraplength=980, justify="left",
+                         text="An Ollama name (qwen3-coder:30b), a Hugging Face repository "
+                              "(unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF, or hf.co/owner/repo:Q4_K_M), "
+                              "or a link to a .gguf file. Checked before anything is downloaded.")
+    get_info.pack(anchor="w", pady=(6, 0))
+    get_entry.bind("<Return>", lambda _e: look_up())
     lib_bar = ttk.Frame(t_lib)
     lib_bar.pack(fill="x", pady=(8, 0))
     ttk.Button(lib_bar, text="Scan again", command=lambda: scan_models()).pack(side="left")
@@ -732,7 +770,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_move.pack(side="left")
     b_open = ttk.Button(lib_btns, text="Open folder", command=lambda: open_selected())
     b_open.pack(side="left", padx=6)
-    lib_state = {"rows": [], "prefs": load_prefs()}
+    lib_state = {"rows": [], "prefs": load_prefs(), "plan": None}
 
     # Connect apps
     t_apps = tab(" Connect apps ")
@@ -1086,7 +1124,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         progress.start(12)
         v_status.set({"setup": "Installing...", "start": "Starting the server...",
                       "stop": "Stopping the server...", "import": "Importing the GGUF...",
-                      "use": "Switching to the model..."}.get(kind, "Working..."))
+                      "use": "Switching to the model...",
+                      "fetch": "Getting the model..."}.get(kind, "Working..."))
         if kind == "show":
             show_output()
 
@@ -1377,6 +1416,77 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         if r:
             open_path(r["path"] if r["kind"] == "folder" else os.path.dirname(r["path"]))
 
+    # Get a model
+    def models_root():
+        return v_root.get() or (state["cfg"] or {}).get("models_root") or setup_flow.default_models_root()
+
+    def look_up(variant=None):
+        text = v_get.get().strip()
+        if not text:
+            return
+        b_lookup.configure(state="disabled")
+        b_fetch.configure(state="disabled")
+        get_info.configure(text=f"Looking up {text}... (reads only the first megabytes)")
+        token = v_token.get().strip()
+
+        def work():
+            try:
+                events.put(("resolved", (model_fetch.resolve(text, token, variant=variant), None)))
+            except model_fetch.FetchError as error:
+                events.put(("resolved", (None, str(error))))
+            except Exception as error:  # a lookup never stops the window
+                traceback.print_exc(file=sys.stderr)
+                events.put(("resolved", (None, f"the lookup failed: {error}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def variant_label(v):
+        return f"{v['label']}  ({setup_hw.fmt_gb(v['size'])})"
+
+    def on_variant(_event=None):
+        plan = lib_state["plan"]
+        if not plan:
+            return
+        picked = next((v for v in plan["variants"] if variant_label(v) == v_variant.get()), None)
+        if picked and picked is not plan["chosen"]:
+            look_up(picked["label"])
+
+    get_variant.bind("<<ComboboxSelected>>", on_variant)
+
+    def show_plan(plan, error):
+        lib_state["plan"] = plan
+        b_lookup.configure(state="normal")
+        if error:
+            get_info.configure(text=f"Not found: {error}")
+            get_variant.configure(state="disabled", values=[])
+            b_fetch.configure(state="disabled")
+            return
+        get_variant.configure(values=[variant_label(v) for v in plan["variants"]],
+                              state="readonly" if len(plan["variants"]) > 1 else "disabled")
+        v_variant.set(variant_label(plan["chosen"]))
+        text, ok = fetch_summary(plan, models_root())
+        get_info.configure(text=text)
+        b_fetch.configure(state="normal" if ok and state["proc"] is None and not state.get("moving") else "disabled")
+
+    def fetch_model():
+        plan = lib_state["plan"]
+        if not plan or not plan["supported"]:
+            return
+        root_dir = models_root()
+        target = model_fetch.import_dir(plan["name"], plan["chosen"], root_dir)
+        row = {"source": "colibri", "id": os.path.basename(target), "path": target, "repo": "", "name": plan["name"]}
+        if os.path.isfile(os.path.join(target, "config.json")):
+            if messagebox.askyesno("colibri", f"{plan['name']} is already here ({target}). Use it now?"):
+                switch_to(row)
+            return
+        if not messagebox.askyesno(
+                "colibri", f"Download {plan['name']} ({plan['chosen']['label']}, "
+                           f"{setup_hw.fmt_gb(plan['chosen']['size'])}) and use it?\n\n"
+                           "It can be cancelled and continued later; every byte is checked."):
+            return
+        cmd = model_fetch.fetch_command(v_get.get().strip(), plan["chosen"]["label"], root_dir, python=py)
+        launch(cmd, extra_env(v_token.get()), "fetch", then=lambda: switch_to(row))
+
     # ---- the event loop's side
     def poll():
         try:
@@ -1396,17 +1506,20 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     elif code == 0:
                         v_status.set({"setup": "Installed.", "start": "Started: the model is loading.",
                                       "stop": "Stopped.", "import": "Imported.",
-                                      "use": "Switched: the model is loading."}.get(what, "Done."))
+                                      "use": "Switched: the model is loading.",
+                                      "fetch": "Downloaded and imported."}.get(what, "Done."))
                     else:
                         v_status.set("It stopped with an error: the output below says why.")
                         show_output()
                     busy("")
                     load_current()
                     refresh_apps()
-                    if what in ("import", "use", "setup", "stop"):
+                    if what in ("import", "use", "setup", "stop", "fetch"):
                         scan_models()
                     if then and code == 0 and not was_cancelled:
                         then()
+                elif kind == "resolved":
+                    show_plan(*payload)
                 elif kind == "library":
                     lib_state["rows"] = payload
                     fill_library()
@@ -1473,7 +1586,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     log_write(payload + "\n")
         except queue.Empty:
             pass
-        if state["proc"] is not None and state["proc_kind"] == "setup":
+        if state["proc"] is not None and state["proc_kind"] in ("setup", "fetch"):
             fraction, text = progress_from_state(setup_flow.read_state())
             if fraction is None:
                 if str(progress.cget("mode")) != "indeterminate":
