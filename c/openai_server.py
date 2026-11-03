@@ -23,6 +23,7 @@ import uuid
 
 import v4_dsml                      # vendored DeepSeek V4 DSML reference primitives
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
+import documents                    # PDF, Office, HTML, text: document parts become text
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
@@ -47,7 +48,8 @@ def default_engine(family=None):
     return HERE / family.engine_artifact
 END = b"\x01\x01END\x01\x01\n"
 READY = b"\x01\x01READY\x01\x01\n"
-MAX_BODY = 4 << 20
+# 32 MB, as Anthropic's API: a document or a photo arrives base64, a third larger than the file.
+MAX_BODY = int(os.environ.get("COLI_MAX_BODY") or 32 << 20)
 PROFILE_TURNS = 120           # rolling window of per-turn PROF snapshots kept for /profile
 DEFAULT_CORS_ORIGINS = (
     "http://127.0.0.1:8000",
@@ -8463,6 +8465,13 @@ class APIHandler(BaseHTTPRequestHandler):
             # served model answers whatever name was asked for.
             if path != "/v1/systemone":
                 self.check_model(body)
+            if path in TEXT_ENDPOINTS:
+                # PDF, Word, Excel, HTML, text...: the text of each document part,
+                # in its place, before any endpoint reads the messages.
+                try:
+                    documents.expand_body(body)
+                except documents.DocumentError as error:
+                    raise APIError(400, str(error), "messages", "invalid_document") from error
             if is_image_engine(self.server.engine) and path in TEXT_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is an image generation model and "
                                     "does not chat: POST /v1/images/generations instead.",

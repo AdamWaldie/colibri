@@ -1,5 +1,10 @@
 export type ChatRole = "system" | "user" | "assistant"
 
+export interface AttachedDocument {
+  name: string
+  url: string
+}
+
 export interface ChatMessage {
   id: string
   role: ChatRole
@@ -13,6 +18,10 @@ export interface ChatMessage {
      than on the draft, because the transcript is resent on every later turn and
      the model has to keep seeing what it was shown. */
   images?: string[]
+  /* Documents attached to this turn (PDF, Word, Excel, text...): their name and
+     data URI. Sent as OpenAI `file` parts; the server reads their text. Kept on
+     the message for the same reason as the pictures. */
+  documents?: AttachedDocument[]
   /* How an assistant turn's last generation ended: the server's finish_reason;
      "aborted" / "error" when the client stopped or lost the stream; or
      "incomplete" when the stream closed without a finish_reason, which colibri
@@ -253,11 +262,12 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
       /* A turn with pictures goes out in the content-array form the API takes;
          a plain turn stays a string, so a text-only server sees exactly what it
          saw before this existed. */
-      messages: options.messages.map(({ role, content, images, reasoning }) => ({
-        ...(images?.length
+      messages: options.messages.map(({ role, content, images, documents, reasoning }) => ({
+        ...(images?.length || documents?.length
           ? { role, content: [
+              ...(documents || []).map(doc => ({ type: "file", file: { filename: doc.name, file_data: doc.url } })),
               ...(content ? [{ type: "text", text: content }] : []),
-              ...images.map(url => ({ type: "image_url", image_url: { url } })),
+              ...(images || []).map(url => ({ type: "image_url", image_url: { url } })),
             ] }
           : { role, content }),
         ...(options.keepReasoning && role === "assistant" && reasoning?.trim() ? { reasoning_content: reasoning } : {}),

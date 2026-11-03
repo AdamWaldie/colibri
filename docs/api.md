@@ -462,6 +462,27 @@ behavior.
 > its system prompt and tool catalog are large, and on a disk-streaming CPU path
 > that is a long silent wait before the first token. Read it before you connect.
 
+## Documents (PDF, Word, Excel, text...)
+
+A document in a request is read to text before the model sees it, so every
+model, with or without vision, can work with one. The three shapes clients send
+are all accepted:
+
+- OpenAI chat: `{"type": "file", "file": {"filename": "r.pdf", "file_data": "data:application/pdf;base64,..."}}`
+- OpenAI Responses (Codex, through `coli ui`): `{"type": "input_file", "filename": ..., "file_data": ...}`
+- Anthropic: `{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": ...}}`,
+  or a `text` or `content` source; `title` and `context` are kept
+
+Each becomes `<document name="r.pdf" pages="12"> ... </document>` in its place.
+Formats: PDF (pypdf when installed, else a built-in reader), Word `.docx`,
+PowerPoint `.pptx`, Excel `.xlsx`, OpenDocument `.odt/.ods/.odp`, EPUB, RTF,
+HTML, and any text file (Markdown, CSV, JSON, XML, YAML, source code). A scanned
+PDF has no text to read and says so; old binary `.doc/.xls/.ppt` files and file
+ids are refused with a 400. Requests may be up to 32 MB (`COLI_MAX_BODY`), a
+document's text is cut at `COLI_DOC_MAX_CHARS` (400,000 characters), and
+compressed streams and archive members are read within fixed bounds.
+The web chat's paperclip attaches documents and images the same way.
+
 ## Connect a coding CLI or editor
 
 The API is OpenAI-compatible, so most coding CLIs and editor extensions work by
