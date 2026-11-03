@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 try:
@@ -268,6 +269,35 @@ class VSCodeExtensions(unittest.TestCase):
         entry = agent_connect.tool("continue")
         self.assertEqual(agent_connect.find_exe(entry, extension=lambda p: "/ext/" + p[0]),
                          "/ext/continue.continue-")
+
+
+
+class NetworkAccess(unittest.TestCase):
+    NET = {"host": "0.0.0.0", "port": 8123, "env": {"COLI_API_KEY": "Abc_def-0123456789xyz"}}
+
+    def test_the_setup_key_and_the_address_for_other_computers(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            c = agent_connect.connection(self.NET, model="q", lan="192.168.1.20")
+        self.assertEqual((c["key"], c["network"], c["base"]), ("Abc_def-0123456789xyz", True, "http://127.0.0.1:8123"))
+        text = agent_connect.instructions("generic", c)
+        self.assertIn("API key: Abc_def-0123456789xyz   (required", text)
+        self.assertIn("From another computer: http://192.168.1.20:8123/v1", text)
+        fixed = agent_connect.connection({"host": "10.0.0.7", "port": 8000}, key="k" * 20)
+        self.assertEqual((fixed["lan"], fixed["base"]), ("10.0.0.7", "http://10.0.0.7:8000"))
+
+    def test_this_pc_only_keeps_the_old_wording(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            c = agent_connect.connection({"host": "127.0.0.1", "port": 8123}, model="q")
+        self.assertEqual((c["key"], c["network"], c["lan"]), ("local", False, None))
+        self.assertIn("enforced only when", agent_connect.instructions("generic", c))
+
+    def test_lan_address(self):
+        self.assertEqual(agent_connect.lan_address(probe=lambda: "192.168.1.20"), "192.168.1.20")
+        self.assertIsNone(agent_connect.lan_address(probe=lambda: "127.0.1.1"))
+
+        def offline():
+            raise OSError("no route")
+        self.assertIsNone(agent_connect.lan_address(probe=offline))
 
 
 if __name__ == "__main__":

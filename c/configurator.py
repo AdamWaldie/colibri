@@ -294,7 +294,8 @@ def plan_lines(options, row=None, free=None):
                  + ("an automatic context." if ctx in ("", "0") else f"a {ctx}-token context."))
     if host in ("0.0.0.0", "::"):
         warnings.append("Address 0.0.0.0 makes the server reachable from other computers on the "
-                        "network; start it with COLI_API_KEY set to require a key.")
+                        "network: the setup makes an API key the server then requires (Connect apps "
+                        "shows it). Windows may ask to let it through the firewall: private networks only.")
     if options.get("start", "background") == "background":
         lines.append("Then start the server in the background"
                      + ("." if options.get("no_browser") else " and open the chat in the browser."))
@@ -939,7 +940,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     app_model = ttk.Combobox(head, textvariable=v_app_model, width=30)
     app_model.pack(side="left", padx=(4, 12))
     ttk.Label(head, text="API key").pack(side="left")
-    ttk.Entry(head, textvariable=v_app_key, width=12).pack(side="left", padx=(4, 12))
+    ttk.Entry(head, textvariable=v_app_key, width=34).pack(side="left", padx=(4, 12))
     ttk.Button(head, text="Refresh", command=lambda: refresh_apps()).pack(side="left")
     app_server = ttk.Label(head, text="", style="Hint.TLabel")
     app_server.pack(side="left", padx=10)
@@ -1375,8 +1376,21 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     def app_conn():
         found = dict(state["apps_models"])
         model = v_app_model.get().strip() or None
-        return agent_connect.connection(state["cfg"], model=model, ctx=found.get(model),
-                                        key=v_app_key.get().strip() or "local")
+        cfg = state["cfg"] or {}
+        lan = state.get("lan") if (cfg.get("host") or "") in ("0.0.0.0", "::", "") else None
+        return agent_connect.connection(cfg, model=model, ctx=found.get(model),
+                                        key=v_app_key.get().strip() or None, lan=lan)
+
+    def sync_key(cfg):
+        """The API key box follows the setup's key (a server on the network requires it),
+        unless the user typed another one."""
+        key = setup_flow.api_key(cfg) or "local"
+        if key != state.get("synced_key") and v_app_key.get().strip() in ("", "local",
+                                                                            state.get("synced_key")):
+            v_app_key.set(key)
+        state["synced_key"] = key
+        if (cfg.get("host") or "") in ("0.0.0.0", "::", "") and "lan" not in state:
+            state["lan"] = agent_connect.lan_address()
 
     def show_app(*_):
         sel = app_list.selection()
@@ -2058,6 +2072,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     changed = (cfg != state["cfg"] or ready != state["ready"]
                                or (server or {}).get("state") != (state["server"] or {}).get("state"))
                     state["cfg"], state["ready"], state["server"] = cfg, ready, server
+                    sync_key(cfg)
                     show_server()
                     update_plan()
                     if changed:

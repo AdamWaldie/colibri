@@ -22,6 +22,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -42,7 +43,7 @@ KEY_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
 # ---------------------------------------------------------------- where the server is
 
 
-def connection(cfg, model=None, ctx=None, key="local", bridge_port=BRIDGE_PORT):
+def connection(cfg, model=None, ctx=None, key=None, bridge_port=BRIDGE_PORT, lan=None):
     """The addresses and identity an app needs, from the saved run configuration.
     A wildcard bind (0.0.0.0) is not an address to connect to: apps on this machine
     use 127.0.0.1."""
@@ -54,7 +55,23 @@ def connection(cfg, model=None, ctx=None, key="local", bridge_port=BRIDGE_PORT):
     return {"base": base, "v1": f"{base}/v1", "bridge": f"http://127.0.0.1:{bridge_port}",
             "bridge_v1": f"http://127.0.0.1:{bridge_port}/v1", "bridge_port": bridge_port,
             "port": port, "model": model or "<model-id>", "ctx": int(ctx or DEFAULT_CTX),
-            "key": key or "local", "network": host in ("0.0.0.0", "::", "")}
+            "key": key or setup_flow.api_key(cfg) or "local", "network": host not in setup_flow.LOOPBACK,
+            "lan": lan or (host if host not in ("0.0.0.0", "::", "") + setup_flow.LOOPBACK else None)}
+
+
+def lan_address(probe=None):
+    """This computer's address on the local network (the one other computers use), or
+    None. Connecting a UDP socket sends nothing: it only picks the outgoing interface."""
+    try:
+        if probe:
+            address = probe()
+        else:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("10.255.255.255", 1))
+                address = sock.getsockname()[0]
+    except OSError:
+        return None
+    return None if address.startswith(("127.", "0.")) else address
 
 
 def served_models(base, key="", timeout=3.0, opener=None):
@@ -382,8 +399,15 @@ def find_exe(entry, which=shutil.which, extension=None):
 def instructions(tool_id, conn):
     """What the user reads (and copies) for one app: a plain-text recipe."""
     v1, model, key, ctx = conn["v1"], conn["model"], conn["key"], conn["ctx"]
-    head = (f"Server: {conn['base']}   model: {model}   context: {ctx} tokens   key: any value "
-            f"(\"{key}\"; enforced only when the server runs with COLI_API_KEY)\n")
+    if conn["network"]:
+        head = (f"Server: {conn['base']}   model: {model}   context: {ctx} tokens\n"
+                f"API key: {key}   (required: the server is reachable from the network)\n")
+        if conn.get("lan"):
+            head += (f"From another computer: http://{conn['lan']}:{conn['port']}/v1 "
+                     f"(Anthropic apps: http://{conn['lan']}:{conn['port']})\n")
+    else:
+        head = (f"Server: {conn['base']}   model: {model}   context: {ctx} tokens   key: any value "
+                f"(\"{key}\"; enforced only when the server runs with COLI_API_KEY)\n")
     if conn["model"] == "<model-id>":
         head += "The server is not answering: start it, then Refresh, to fill in the model id.\n"
     if tool_id == "claude":
@@ -505,9 +529,10 @@ def instructions(tool_id, conn):
             "directly: colibri speaks the OpenAI and Anthropic APIs, not Ollama's. Cloud apps "
             "(a website, or an editor whose requests go through its vendor's servers) cannot "
             "reach 127.0.0.1 at all.\n\n"
-            "Other computers on the network: set Address to 0.0.0.0 on the Run tab, Install / "
-            "Apply, use this computer's IP address in the URL, and start the server with "
-            "COLI_API_KEY set so a key is required.")
+            "Other computers on the network: set Address to 0.0.0.0 (step 3, Options) and "
+            "Install. The setup makes an API key, which the server then requires, and this tab "
+            "shows it with this computer's address. Windows may ask once to let colibri through "
+            "its firewall: allow it on private networks only.")
     raise KeyError(tool_id)
 
 
@@ -587,7 +612,10 @@ def start_bridge(conn, python=None):
     log = os.path.join(setup_flow.setup_home(), "logs", "bridge.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     with open(log, "ab") as out:
-        subprocess.Popen(bridge_command(conn, python=python), cwd=HERE, stdin=subprocess.DEVNULL,
+        env = dict(os.environ)
+        if conn["network"]:
+            env["COLI_API_KEY"] = conn["key"]      # the bridge's own calls to the server need it
+        subprocess.Popen(bridge_command(conn, python=python), cwd=HERE, stdin=subprocess.DEVNULL, env=env,
                          stdout=out, stderr=subprocess.STDOUT, creationflags=flags,
                          start_new_session=sys.platform != "win32")
     return True

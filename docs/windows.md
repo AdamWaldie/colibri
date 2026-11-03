@@ -80,6 +80,21 @@ code (only what changed). A release folder is compared with the latest release, 
 **Open the download page** fetches the new one: unpack it over the folder with colibri
 stopped.
 
+**Other computers on the network:** set Address to `0.0.0.0` in step 3 (Options) and
+press Install. The server refuses to be reachable from the network without an API key,
+so the setup makes one.
+- The key is random and saved with the setup (`COLI_API_KEY` in `setup.json`), so
+  `coli start`, START-HERE.bat and the window all run with it.
+- Running setup again keeps the same key, so apps that already have it keep working.
+- Setting the address back to `127.0.0.1` removes it.
+- A `COLI_API_KEY` set in your own environment wins over the saved one, as it always did.
+- Connect apps fills in the key, and shows the address other computers use (for example
+  `http://192.168.1.20:8000/v1`).
+- `coli setup` and `coli start` print the key with the URLs.
+- The browser chat asks for it in its API key field.
+- Windows may ask once to let colibri through the firewall. Allow it on private
+  networks only.
+
 **Speed** (This PC tab) has **Tune speed**, which runs `coli tune` on the installed
 model with the same model, GPU and context settings `coli start` uses.
 - It tries only settings that don't change the answers (how the expert cache and

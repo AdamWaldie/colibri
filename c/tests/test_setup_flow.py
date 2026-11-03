@@ -721,12 +721,50 @@ class RunConfiguration(HomeTestCase):
         replies = {"/health": {"status": "ok", "live": live + ["junk"]}, "/profile": {"turns": []},
                    "/v1/models": {"data": [{"id": "q"}]}}
 
-        def get(url, timeout=2.0, require_colibri=False):
+        def get(url, timeout=2.0, require_colibri=False, key=None):
             return 200, replies[url.split(":8123", 1)[1]]
 
         with mock.patch.object(setup_flow, "_get_json", get):
             status = setup_flow.server_status({"port": 8123, "host": "127.0.0.1"})
         self.assertEqual((status["state"], status["live"], status["model_id"]), ("ready", live, "q"))
+
+    def test_network_key(self):
+        self.assertIsNone(setup_flow.network_key("127.0.0.1", {"COLI_API_KEY": "x" * 20}))
+        self.assertIsNone(setup_flow.network_key("::1"))
+        self.assertEqual(setup_flow.network_key("0.0.0.0", {"COLI_API_KEY": "k" * 20}), "k" * 20)
+        self.assertEqual(setup_flow.network_key("0.0.0.0", {"COLI_API_KEY": "short"}, make=lambda n: "N" * n), "N" * 24)
+        self.assertEqual(setup_flow.network_key("192.168.1.5", None, make=lambda n: "M" * n), "M" * 24)
+
+    def test_api_key_from_the_environment_wins(self):
+        cfg = {"env": {"COLI_API_KEY": "saved"}}
+        with mock.patch.dict(os.environ, {"COLI_API_KEY": "mine"}):
+            self.assertEqual(setup_flow.api_key(cfg), "mine")
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(setup_flow.api_key(cfg), "saved")
+            self.assertIsNone(setup_flow.api_key({"env": {}}))
+
+    def test_status_probes_send_the_key(self):
+        seen = []
+
+        class Reply(io.BytesIO):
+            status = 200
+            headers = {"Server": "colibri/2"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def urlopen(request, timeout=None):
+            seen.append((request.full_url, request.get_header("Authorization")))
+            return Reply(b'{"status": "ok"}')
+
+        with mock.patch.object(setup_flow.urllib.request, "urlopen", urlopen), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            setup_flow.server_status({"port": 8123, "host": "0.0.0.0", "env": {"COLI_API_KEY": "secret-key-123456"}})
+        self.assertTrue(seen)
+        self.assertTrue(all(auth == "Bearer secret-key-123456" for _, auth in seen), seen)
 
     def test_last_turn_speed(self):
         self.assertEqual(setup_flow.last_turn_speed({"turns": [{"wall_s": 4.0, "completion_tokens": 10}]}),
@@ -1301,6 +1339,19 @@ class WholeSetup(HomeTestCase):
             Path(current["model_dir"], "model-00000.safetensors").read_bytes(),
             self.shard,
         )
+
+    def test_a_network_setup_makes_a_key_and_keeps_it(self):
+        code, text = self.run_setup(pick="tiny")
+        self.assertEqual(code, 0, text)
+        self.assertNotIn("COLI_API_KEY", setup_flow.load_config()["env"])
+        code, text = self.run_setup(host="0.0.0.0")
+        self.assertEqual(code, 0, text)
+        key = setup_flow.load_config()["env"]["COLI_API_KEY"]
+        self.assertRegex(key, r"^[A-Za-z0-9_-]{32}$")
+        code, text = self.run_setup(host="0.0.0.0")
+        self.assertEqual(setup_flow.load_config()["env"]["COLI_API_KEY"], key)   # apps keep working
+        code, text = self.run_setup(host="127.0.0.1")
+        self.assertNotIn("COLI_API_KEY", setup_flow.load_config()["env"])
 
     def test_ready_setup_honors_explicit_host(self):
         code, text = self.run_setup(pick="tiny")
