@@ -420,14 +420,44 @@ curl http://127.0.0.1:8000/v1/messages \
        "messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-For Claude Code, point it at the server and give it any non-empty key:
+For Claude Code, point it at the server and give it any non-empty key. The
+configurator's **Connect apps** sets all of this for you; by hand:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8000
-export ANTHROPIC_API_KEY=local            # only enforced if you set COLI_API_KEY
-export ANTHROPIC_MODEL=glm-5.2-colibri
+export ANTHROPIC_AUTH_TOKEN=local         # only enforced if you set COLI_API_KEY
+export ANTHROPIC_MODEL=glm-5.2-colibri    # and the same for every tier:
+export ANTHROPIC_DEFAULT_OPUS_MODEL=glm-5.2-colibri ANTHROPIC_DEFAULT_SONNET_MODEL=glm-5.2-colibri
+export ANTHROPIC_DEFAULT_HAIKU_MODEL=glm-5.2-colibri
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536     # the server's context (coli status, /v1/models)
+export CLAUDE_CODE_MAX_OUTPUT_TOKENS=16000      # Claude Code's default, 32000, leaves a local context little room
+export ANTHROPIC_CUSTOM_HEADERS="x-colibri-context-compaction: auto"   # colibri compacts if a session outgrows it
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1                    # /model lists the served model
 claude
 ```
+
+With a context of 100,000 tokens or more, also set `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to it
+(Claude Code takes 100k to 1M), so Claude Code compacts on its own before colibri has to.
+
+What Claude Code sends and colibri serves, checked against Claude Code 2.1.317: the system
+prompt and the `system` messages it places among the others (its environment), tools with
+`cache_control`, adaptive thinking, `context_management` and `output_config` (accepted),
+`tool_use` / `tool_result` round trips, `POST /v1/messages/count_tokens` (an estimate from
+the tokens per character the server measured), and `GET /v1/models` in Anthropic's shape
+too (`type`, `display_name`, `created_at`, `has_more`). Skills, plugins, slash commands,
+subagents and MCP servers run inside Claude Code and reach the model as tool calls (a
+skill is the `Skill` tool, whose result carries the skill's instructions), so they work
+with a model that calls tools well. The `x-colibri-context-compaction: auto` header
+(or the body's `context_compaction`, or `COLI_COMPACT=1`) turns on the same context
+compaction `/v1/chat/completions` has, on `/v1/messages`.
+
+Codex reaches colibri through `coli ui`'s Responses bridge, which asks for compaction on
+every request. Run it on the user's own configuration with overrides, so its skills, MCP
+servers and `AGENTS.md` stay in use: `codex -c model_provider=colibri -c
+model_providers.colibri.name=colibri -c model_providers.colibri.base_url=http://localhost:8790/v1
+-c model_providers.colibri.env_key=COLIBRI_API_KEY -c model_providers.colibri.wire_api=responses
+-c model=glm-5.2-colibri -c model_context_window=65536`. T3 Code runs Codex or Claude
+Code, so it gets the same.
 
 Supported on every served architecture: system prompts (string or text blocks),
 multi-turn `user`/`assistant` messages, streaming with the full named-event

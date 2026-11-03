@@ -62,7 +62,7 @@ moved model.
 Ollama is used. The model id and context come from the server's `/v1/models`.
 Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a
 new terminal in a project folder already pointed at colibri: through environment
-variables, or a CODEX_HOME / HERMES_HOME under the setup folder, never by changing
+variables, `-c` overrides (Codex) or a HERMES_HOME under the setup folder, never by changing
 their own settings. Codex speaks only the Responses API, so it goes through
 `coli ui` on port 8790 (started for you). Each app also shows the lines to paste
 for a permanent setup; T3 Code (which runs Codex or Claude Code) and any

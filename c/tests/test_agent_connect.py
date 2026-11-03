@@ -84,9 +84,21 @@ class AppConfigurations(unittest.TestCase):
     def test_claude_code_uses_the_anthropic_endpoint_for_every_tier(self):
         env = agent_connect.claude_env(conn())
         self.assertEqual(env["ANTHROPIC_BASE_URL"], "http://127.0.0.1:8123")   # no /v1: Claude adds it
-        for name in ("ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        for name in ("ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL",
                      "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"):
             self.assertEqual(env[name], "qwen3.6-colibri")
+        self.assertNotIn("ANTHROPIC_SMALL_FAST_MODEL", env)                    # deprecated
+
+    def test_claude_code_knows_the_real_context_and_compacts(self):
+        env = agent_connect.claude_env(conn(ctx=65536))
+        self.assertEqual(env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"], "65536")
+        self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "16000")
+        self.assertEqual(env["ANTHROPIC_CUSTOM_HEADERS"], "x-colibri-context-compaction: auto")
+        self.assertEqual(env["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"], "1")
+        self.assertNotIn("CLAUDE_CODE_AUTO_COMPACT_WINDOW", env)    # below Claude Code's 100k minimum
+        big = agent_connect.claude_env(conn(ctx=131072))
+        self.assertEqual(big["CLAUDE_CODE_AUTO_COMPACT_WINDOW"], "131072")
+        self.assertEqual(agent_connect.claude_output_tokens(8192), 2048)
 
     def test_hermes_yaml(self):
         text = agent_connect.hermes_yaml(conn())
@@ -109,11 +121,18 @@ class AppConfigurations(unittest.TestCase):
 
 
 class Launching(unittest.TestCase):
-    def test_codex_and_hermes_get_a_home_of_colibris_own(self):
+    def test_codex_keeps_the_users_home_and_hermes_gets_its_own(self):
         with tempfile.TemporaryDirectory() as home:
-            env, _args, files = agent_connect.launch_plan("codex", conn(), home=home)
-            self.assertEqual(env["CODEX_HOME"], os.path.join(home, "codex"))
-            self.assertEqual(list(files), [os.path.join(home, "codex", "config.toml")])
+            env, args, files = agent_connect.launch_plan("codex", conn(), home=home)
+            self.assertNotIn("CODEX_HOME", env)                    # their skills, MCP, plugins stay
+            self.assertEqual(files, {})
+            pairs = dict(a.split("=", 1) for a in args[1::2])
+            self.assertEqual(args[0::2], ["-c"] * len(pairs))
+            self.assertEqual(pairs["model_provider"], "colibri")
+            self.assertEqual(pairs["model_providers.colibri.base_url"], "http://127.0.0.1:8790/v1")
+            self.assertEqual(pairs["model_providers.colibri.wire_api"], "responses")
+            self.assertEqual(pairs["model_context_window"], "65536")
+            self.assertFalse(any('"' in a for a in args))           # nothing for cmd.exe to mangle
             env, _args, files = agent_connect.launch_plan("hermes", conn(), home=home)
             self.assertEqual(env["HERMES_HOME"], os.path.join(home, "hermes"))
             for path in files:

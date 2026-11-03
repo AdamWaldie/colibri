@@ -107,7 +107,10 @@ def to_chat(body):
             started = True
             rest.append(m)
     msgs = ([{"role": "system", "content": "\n\n".join(x for x in head if x)}] if head else []) + rest
-    chat = {"model": body.get("model"), "messages": msgs, "stream": True, "stream_options": {"include_usage": True}}
+    # Codex sessions are long: past the context, the gateway summarizes the first
+    # messages instead of refusing the turn (openai_server context compaction).
+    chat = {"model": body.get("model"), "messages": msgs, "stream": True, "stream_options": {"include_usage": True},
+            "context_compaction": "auto"}
     if tools:
         chat["tools"] = tools
     if body.get("tool_choice") in ("auto", "none", "required"):
