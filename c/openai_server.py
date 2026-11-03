@@ -4981,6 +4981,23 @@ def anthropic_to_openai(body):
     raw = body.get("messages")
     if not isinstance(raw, list) or not raw:
         raise APIError(400, "`messages` must be a non-empty array.", "messages")
+    # Claude Code (2.1+) sends context such as its environment as a `system` message
+    # among the others. Its text joins the system prompt: the chat templates take one
+    # system message, at the start.
+    extra_system = []
+    for index, message in enumerate(raw):
+        if isinstance(message, dict) and message.get("role") == "system":
+            text = _anthropic_block_text(message.get("content"), f"messages.{index}.content")
+            if text and text.strip():
+                extra_system.append(text)
+    if extra_system:
+        raw = [m for m in raw if not (isinstance(m, dict) and m.get("role") == "system")]
+        if not raw:
+            raise APIError(400, "`messages` needs a user message besides the system ones.", "messages")
+        if messages and messages[0]["role"] == "system":
+            messages[0]["content"] = "\n\n".join([messages[0]["content"]] + extra_system)
+        else:
+            messages.insert(0, {"role": "system", "content": "\n\n".join(extra_system)})
     for index, message in enumerate(raw):
         if not isinstance(message, dict):
             raise APIError(400, "Each message must be an object.", f"messages.{index}")
@@ -7682,7 +7699,11 @@ class Engine:
 
 
 def model_object(model_id, created):
-    return {"id": model_id, "object": "model", "created": created, "owned_by": "colibri"}
+    """One model, in OpenAI's shape and Anthropic's (`type`, `display_name`, `created_at`):
+    Claude Code's gateway model discovery reads the second, OpenAI clients the first."""
+    return {"id": model_id, "object": "model", "created": created, "owned_by": "colibri",
+            "type": "model", "display_name": model_id,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created))}
 
 
 def is_image_engine(engine):
@@ -8424,8 +8445,11 @@ class APIHandler(BaseHTTPRequestHandler):
             if path == "/v1/models":
                 # `data` is OpenAI's list; `models` is Jev's (name, description,
                 # release_date), which the TypeSafe SDKs' models.list() reads.
+                # has_more / first_id / last_id: Anthropic's list envelope, for the same reason.
                 self.send_json(200, {"object": "list", "data": [self.server.model_entry()],
-                                     "models": [self.server.jev_model_card()]},
+                                     "models": [self.server.jev_model_card()],
+                                     "has_more": False, "first_id": self.server.model_id,
+                                     "last_id": self.server.model_id},
                                request_id)
             elif path.startswith("/v1/models/") and unquote(path[11:]) == self.server.model_id:
                 self.send_json(200, self.server.model_entry(), request_id)
@@ -8491,6 +8515,8 @@ class APIHandler(BaseHTTPRequestHandler):
                 self.systemone(body, request_id)
             elif path == "/v1/messages":
                 self.anthropic_messages(body, request_id)
+            elif path == "/v1/messages/count_tokens":
+                self.anthropic_count_tokens(body, request_id)
             else:
                 raise APIError(404, "Not found.", None, "not_found")
         except APIError as error:
@@ -9891,7 +9917,7 @@ class APIHandler(BaseHTTPRequestHandler):
             if body.get(unsupported) not in (None, [], ""):
                 raise APIError(400, f"Colibri does not support `{unsupported}` ({why}) yet.",
                                unsupported, "unsupported_value")
-        messages, image = self.expand_images(anthropic_to_openai(body))
+        conversation_messages = anthropic_to_openai(body)
         tools, tool_choice = anthropic_tools(body)
         thinking = body.get("thinking")
         if thinking is not None and not isinstance(thinking, dict):
@@ -9906,25 +9932,80 @@ class APIHandler(BaseHTTPRequestHandler):
             enable_thinking = False   # #984: OLMoE has no thinking mode (see the OpenAI path)
         if body.get("max_tokens") is None:
             raise APIError(400, "`max_tokens` is required.", "max_tokens")
-        # Reuse the OpenAI path's own validation by handing it an equivalent body.
-        translated = {"messages": messages, "max_tokens": body.get("max_tokens"),
-                      "temperature": body.get("temperature"), "top_p": body.get("top_p"),
-                      "stream": body.get("stream", False), "cache_slot": body.get("cache_slot")}
-        if tools:
-            translated["tools"] = tools
-        if tool_choice is not None:
-            translated["tool_choice"] = tool_choice
-        if tool_choice == "none":
-            tools = None
+        offered = tools
+        render_tools = None if tool_choice == "none" else tools
         default_effort = "xhigh" if chat_flavor() == "qwen38" and thinking is None else "high"
-        add_generation_prompt = resolve_generation_prompt(messages, body)
-        prompt = render_chat_for_arch(messages, enable_thinking,
-                                      default_effort if enable_thinking else None,
-                                      tools, tool_choice,
-                                      add_generation_prompt=add_generation_prompt,
-                                      preserve_thinking=not enable_thinking)
-        self.anthropic_generation(translated, prompt, request_id, tools, enable_thinking,
-                                  add_generation_prompt, image)
+        effort = default_effort if enable_thinking else None
+        # Context compaction, as on /v1/chat/completions: the body's `context_compaction`,
+        # COLI_COMPACT=1, or the header an agent can always send (Claude Code:
+        # ANTHROPIC_CUSTOM_HEADERS="x-colibri-context-compaction: auto"), so a long
+        # session goes on, on a summary of its first messages.
+        compact = compaction_requested(body) or (
+            (self.headers.get("x-colibri-context-compaction") or "").strip().lower() in ("auto", "on", "1", "true"))
+        render = dict(enable_thinking=enable_thinking, reasoning_effort=effort, tools=render_tools,
+                      tool_choice=tool_choice, preserve_thinking=not enable_thinking)
+        lead, conversation = split_lead(conversation_messages)
+        keys = compaction_keys(lead, conversation) if compact else None
+        done, summary = (self.server.compactions.find(keys[:len(conversation)]) if compact
+                         else (0, None))
+        for attempt in range(4):
+            view = (conversation_messages if summary is None
+                    else with_summary(lead, summary) + conversation[done:])
+            messages, image = self.expand_images(view)
+            # Reuse the OpenAI path's own validation by handing it an equivalent body.
+            translated = {"messages": messages, "max_tokens": body.get("max_tokens"),
+                          "temperature": body.get("temperature"), "top_p": body.get("top_p"),
+                          "stream": body.get("stream", False), "cache_slot": body.get("cache_slot")}
+            if offered:
+                translated["tools"] = offered
+            if tool_choice is not None:
+                translated["tool_choice"] = tool_choice
+            add_generation_prompt = resolve_generation_prompt(messages, body)
+            prompt = render_chat_for_arch(messages, enable_thinking, effort,
+                                          render_tools, tool_choice,
+                                          add_generation_prompt=add_generation_prompt,
+                                          preserve_thinking=not enable_thinking)
+            exceeded = self._context_pressure(translated, prompt) if compact and attempt == 0 else None
+            if exceeded is None:
+                try:
+                    self.anthropic_generation(translated, prompt, request_id, render_tools, enable_thinking,
+                                              add_generation_prompt, image)
+                    return
+                except APIError as error:
+                    context = getattr(error, "context", None)
+                    if not compact or error.code != "context_length_exceeded" or not context:
+                        raise
+                    used, limit = context
+                    self.server.context_limit = limit
+                    if image is None and len(prompt) >= 256:
+                        self.server.note_prompt_size(prompt, {"prompt_tokens": used})
+                    exceeded = error
+            moved = self._compact(translated, conversation_messages, lead, conversation, keys, done,
+                                  summary, render)
+            if moved is None:
+                if isinstance(exceeded, APIError):
+                    raise exceeded
+                compact = False          # nothing older to summarize: let the engine fit the answer
+                continue
+            done, summary = moved
+        raise APIError(400, "The conversation does not fit the model's context even after "
+                            "summarizing it: the last message alone is too long.",
+                       "messages", "context_length_exceeded")
+
+    def anthropic_count_tokens(self, body, request_id):
+        """POST /v1/messages/count_tokens: the prompt a /v1/messages request would render,
+        counted by the tokens per character this server measured on its prompts (an
+        estimate until the first one; Claude Code reads it to size its context)."""
+        if not isinstance(body, dict):
+            raise APIError(400, "The request body must be a JSON object.")
+        documents.expand_body(body)
+        messages, _image = self.expand_images(anthropic_to_openai(body))
+        tools, tool_choice = anthropic_tools(body)
+        prompt = render_chat_for_arch(messages, False, None,
+                                      None if tool_choice == "none" else tools, tool_choice,
+                                      add_generation_prompt=True, preserve_thinking=True)
+        ratio = getattr(self.server, "tokens_per_char", None) or COMPACT_DEFAULT_RATIO
+        self.send_json(200, {"input_tokens": max(1, int(len(prompt) * ratio + 0.5))}, request_id)
 
     def anthropic_generation(self, body, prompt, request_id, tools, enable_thinking,
                              add_generation_prompt=True, image=None):

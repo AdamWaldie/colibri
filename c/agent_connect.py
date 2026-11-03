@@ -11,7 +11,8 @@ ui/responses_shim.py) translates: Codex connects to that bridge, not to the serv
 
 Launching never rewrites the user's own settings: Claude Code and opencode get
 colibri through environment variables, Codex and Hermes through a home folder of
-their own under the setup folder (CODEX_HOME, HERMES_HOME). The "permanent" text is
+their own under the setup folder (HERMES_HOME), Codex through `-c` overrides that leave
+the user's own CODEX_HOME (skills, MCP servers, plugins) in use. The "permanent" text is
 for the user to paste where they choose. The same rules as ui/agents.py, for a
 configurator that runs natively on Windows rather than from WSL.
 
@@ -99,7 +100,7 @@ def _out_tokens(ctx):
 
 def codex_toml(conn, default=True):
     """Codex's configuration for colibri. default=True makes it the default provider
-    (a CODEX_HOME of colibri's own, or T3 Code, which runs Codex underneath);
+    (T3 Code, which runs Codex underneath);
     default=False is a profile to add to the user's own ~/.codex/config.toml."""
     provider = ("[model_providers.colibri]\n"
                 'name = "colibri"\n'
@@ -114,6 +115,19 @@ def codex_toml(conn, default=True):
             'model_provider = "colibri"\n'
             f'model = "{conn["model"]}"\n'
             f'model_context_window = {conn["ctx"]}\n')
+
+
+def codex_args(conn):
+    """Codex on colibri for one run, as -c overrides of the user's own configuration."""
+    pairs = (("model_provider", "colibri"), ("model_providers.colibri.name", "colibri"),
+             ("model_providers.colibri.base_url", conn["bridge_v1"]),
+             ("model_providers.colibri.env_key", "COLIBRI_API_KEY"),
+             ("model_providers.colibri.wire_api", "responses"),
+             ("model", conn["model"]), ("model_context_window", str(conn["ctx"])))
+    args = []
+    for key, value in pairs:
+        args += ["-c", f"{key}={value}"]
+    return args
 
 
 def opencode_config(conn):
@@ -135,13 +149,36 @@ def hermes_yaml(conn):
             f"  context_length: {conn['ctx']}\n")
 
 
+CLAUDE_MIN_AUTO_COMPACT = 100_000     # Claude Code takes an auto-compact window of 100k to 1M
+
+
+def claude_output_tokens(ctx):
+    """What Claude Code may ask for per answer: a quarter of the context, at most 16k
+    (it reserves this much of the window, and its own default, 32k, would leave a
+    local context little room)."""
+    return max(1024, min(16_000, ctx // 4))
+
+
 def claude_env(conn):
-    model = conn["model"]
-    return {"ANTHROPIC_BASE_URL": conn["base"], "ANTHROPIC_AUTH_TOKEN": conn["key"],
-            "ANTHROPIC_MODEL": model, "ANTHROPIC_SMALL_FAST_MODEL": model,
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
-            "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1"}
+    """Claude Code on colibri, everything it needs from the environment (code.claude.com
+    docs, env-vars): every model tier on the served model; the context the server
+    really holds, so it compacts in time, and room for answers; colibri's own
+    compaction as the safety net (the header, on every request); gateway model
+    discovery, which reads /v1/models. Skills, plugins, subagents and MCP tools run in
+    Claude Code and reach the model as tool calls: nothing more to set for them."""
+    model, ctx = conn["model"], conn["ctx"]
+    env = {"ANTHROPIC_BASE_URL": conn["base"], "ANTHROPIC_AUTH_TOKEN": conn["key"],
+           "ANTHROPIC_MODEL": model,
+           "ANTHROPIC_DEFAULT_OPUS_MODEL": model, "ANTHROPIC_DEFAULT_SONNET_MODEL": model,
+           "ANTHROPIC_DEFAULT_HAIKU_MODEL": model,
+           "CLAUDE_CODE_MAX_CONTEXT_TOKENS": str(ctx),
+           "CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(claude_output_tokens(ctx)),
+           "ANTHROPIC_CUSTOM_HEADERS": "x-colibri-context-compaction: auto",
+           "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+           "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1"}
+    if ctx >= CLAUDE_MIN_AUTO_COMPACT:
+        env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(ctx)
+    return env
 
 
 def env_lines(env, shell="cmd", persist=False):
@@ -207,15 +244,24 @@ def instructions(tool_id, conn):
             + json.dumps({"env": env}, indent=2) + "\n\n"
             "Putting the same \"env\" block in %USERPROFILE%\\.claude\\settings.json makes EVERY "
             "Claude Code session use colibri instead of Anthropic's models.\n\n"
+            "What the variables do: every model tier (Opus, Sonnet, Haiku, background tasks) uses "
+            "the local model; CLAUDE_CODE_MAX_CONTEXT_TOKENS is the context the server really "
+            "holds, so Claude Code compacts in time; the custom header turns on colibri's own "
+            "compaction as the safety net; gateway model discovery lists the model in /model.\n\n"
+            "Skills, plugins, slash commands, subagents and MCP servers work as usual: they run "
+            "in Claude Code and reach the model as tool calls, so they need a model that calls "
+            "tools well (Qwen3-Coder, Qwen3.6, GLM).\n\n"
             "Expect a long first answer: Claude Code sends a large system prompt and tool list "
             "(10-20k tokens) that the model reads before it writes. A model that runs from RAM "
-            "(Qwen3.6, Qwen3-Coder) is the practical choice; give the server a context of 65536 or more.")
+            "(Qwen3.6, Qwen3-Coder) is the practical choice; give the server a context of 65536 or "
+            "more (131072 or more lets Claude Code's own auto-compact work too).")
     if tool_id == "codex":
         return head + (
             f"\nCodex speaks only the Responses API. colibri's chat UI gateway translates it: "
             f"'Start bridge' runs `coli ui` on {conn['bridge']} in front of the server, and Codex "
             f"connects to {conn['bridge_v1']}. 'Open in terminal' starts the bridge if needed and "
-            "runs Codex with a CODEX_HOME of colibri's own (your ~/.codex is not touched).\n\n"
+            "runs Codex on colibri through -c overrides: your ~/.codex is not changed, and your "
+            "skills, MCP servers, plugins and AGENTS.md keep working.\n\n"
             "Permanently: add this to %USERPROFILE%\\.codex\\config.toml\n\n"
             + codex_toml(conn, default=False) +
             f"\nthen, with the bridge running:\n{env_lines({'COLIBRI_API_KEY': key}, persist=True)}\n"
@@ -291,9 +337,10 @@ def launch_plan(tool_id, conn, home=None):
         return ({"OPENCODE_CONFIG_CONTENT": json.dumps(opencode_config(conn), separators=(",", ":"))},
                 ["-m", f"colibri/{conn['model']}"], {})
     if tool_id == "codex":
-        folder = os.path.join(home, "codex")
-        return ({"CODEX_HOME": folder, "COLIBRI_API_KEY": conn["key"]}, [],
-                {os.path.join(folder, "config.toml"): codex_toml(conn, default=True)})
+        # The user's own CODEX_HOME, untouched: their skills, MCP servers, plugins and
+        # AGENTS.md stay available; colibri comes in as `-c` overrides for this run
+        # (dotted keys, no quotes, so nothing for cmd.exe to mangle).
+        return {"COLIBRI_API_KEY": conn["key"]}, codex_args(conn), {}
     if tool_id == "hermes":
         folder = os.path.join(home, "hermes")
         return ({"HERMES_HOME": folder}, [], {os.path.join(folder, "config.yaml"): hermes_yaml(conn)})
