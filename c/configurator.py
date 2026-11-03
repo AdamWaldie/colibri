@@ -50,6 +50,7 @@ import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
 import setup_flow  # noqa: E402
 import setup_hw  # noqa: E402
+import win_shortcuts  # noqa: E402
 
 GB = setup_catalog.GB
 BACKENDS = ("auto", "cpu", "vulkan", "cuda")
@@ -869,6 +870,17 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         ttk.Label(paths, text=path).grid(row=r, column=1, sticky="w", padx=6)
         ttk.Button(paths, text="Open", command=lambda p=path: open_path(p)).grid(row=r, column=2)
     ttk.Button(t_pc, text="Check again", command=lambda: detect()).pack(anchor="w", pady=10)
+    sc_box = ttk.LabelFrame(t_pc, text="Shortcut", padding=8)
+    sc_box.pack(fill="x", pady=(6, 0))
+    sc_info = ttk.Label(sc_box, text="", wraplength=900, justify="left")
+    sc_info.pack(anchor="w")
+    sc_row = ttk.Frame(sc_box)
+    sc_row.pack(anchor="w", pady=(6, 0))
+    b_sc_add = ttk.Button(sc_row, text="Add colibri to the Start menu and desktop",
+                          command=lambda: shortcuts("create"))
+    b_sc_add.pack(side="left")
+    b_sc_remove = ttk.Button(sc_row, text="Remove the shortcuts", command=lambda: shortcuts("remove"))
+    b_sc_remove.pack(side="left", padx=6)
 
     # Details
     t_cur = tab(" Details ")
@@ -1271,6 +1283,51 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
 
+    # Shortcuts: colibri in the Start menu and on the desktop
+    def shortcuts(action):
+        if sys.platform != "win32":
+            sc_info.configure(text="The shortcut is made on Windows.")
+            return
+        sc_info.configure(text="Working...")
+
+        def work():
+            try:
+                if action == "create":
+                    win_shortcuts.create()
+                elif action == "remove":
+                    win_shortcuts.remove()
+                events.put(("shortcuts", (win_shortcuts.status(), None)))
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                events.put(("shortcuts", (None, str(error))))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_shortcuts(found, error):
+        if error:
+            sc_info.configure(text=f"Could not do it: {error}")
+            return
+        both = found and all(found.values())
+        if both:
+            sc_info.configure(text="colibri is in the Start menu and on the desktop: it opens this window "
+                                   "(no command line needed). Moved the colibri folder? Add them again.")
+        elif found and any(found.values()):
+            sc_info.configure(text="One of the two shortcuts is missing: add them again.")
+        else:
+            sc_info.configure(text="Open this window from the Start menu or the desktop, with the "
+                                   "colibri icon, instead of CONFIGURE.bat.")
+        b_sc_remove.configure(state="normal" if found and any(found.values()) else "disabled")
+
+    def offer_shortcuts():
+        """Asked once, the first time the window opens on Windows."""
+        if sys.platform != "win32" or lib_state["prefs"].get("shortcut_offered"):
+            return
+        lib_state["prefs"]["shortcut_offered"] = True
+        save_prefs(lib_state["prefs"])
+        if messagebox.askyesno("colibri", "Add colibri to the Start menu and the desktop?\n\n"
+                                          "It opens this window, with the colibri icon. "
+                                          "(This PC tab: add or remove them later.)"):
+            shortcuts("create")
+
     # Open app: one click from the top bar
     def fill_apps_menu():
         apps_menu.delete(0, "end")
@@ -1659,6 +1716,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         refresh_apps()
                     elif not state.get("app_wait_cancel"):
                         v_status.set("The model did not load within an hour: see Details, Server log.")
+                elif kind == "shortcuts":
+                    show_shortcuts(*payload)
                 elif kind == "resolved":
                     show_plan(*payload)
                 elif kind == "library":
@@ -1762,6 +1821,11 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     detect()
     app_list.selection_set("claude")
     scan_models()
+    if sys.platform == "win32":
+        shortcuts("status")
+        root.after(1500, offer_shortcuts)
+    else:
+        show_shortcuts(None, None)
     threading.Thread(target=watch_server, daemon=True).start()
     show_server()
     load_current()
