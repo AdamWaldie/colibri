@@ -44,7 +44,15 @@ Each says whether colibri runs it. A GGUF from Ollama or elsewhere runs after
 architecture is one colibri's engines serve: the Qwen3 / Qwen3-Coder MoE,
 Qwen3.5 / 3.6, GLM, DeepSeek V4, MiMo, Inkling, Kimi K3 and OLMoE families. Most
 Ollama models (Llama, Gemma, Mistral, Phi) are other architectures and are listed
-as not runnable. **Use this model** switches the setup to it (stopping the running
+as not runnable. **Get a new model** (at the top of My models) downloads one straight into
+colibri: an Ollama name (`qwen3-coder:30b`, no Ollama needed), a Hugging Face
+GGUF repository (`unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF`, or
+`hf.co/owner/repo:Q4_K_M`; pick the quantization, Q4_K_M by default), or a link
+to a `.gguf` file. **Look up** reads only the first megabytes, so a model colibri
+cannot run is refused before it is downloaded. **Download and use** fetches it
+(resumable, checked against the published SHA-256), imports it and switches to
+it; from a terminal: `py -3 c\model_fetch.py qwen3-coder:30b`.
+**Use this model** switches the setup to it (stopping the running
 server first). **Move to another drive** renames the folder on the same drive, or
 copies it to another one with progress, checks every file's size and only then
 removes the original; Cancel leaves it where it was, and the setup follows a
