@@ -84,6 +84,8 @@ export interface HealthResponse {
   continue_assistant?: boolean
   /* the server compacts a chat that outgrows the context when asked (context_compaction) */
   context_compaction?: boolean
+  /* the server reads Agent Skills (SKILL.md folders) and takes "skills" on a chat request */
+  skills?: boolean
   context_tokens?: number
   /* the response ceiling a request is lowered to; without a ceiling of its own a
      request gets this one: on colibrì the context the engine holds */
@@ -171,6 +173,22 @@ export async function listModelInfo(baseUrl: string, apiKey: string, signal?: Ab
     : { id })
 }
 
+export interface Skill {
+  name: string
+  description: string
+  source?: string
+}
+
+/* The Agent Skills a colibrì server found (~/.claude/skills, ~/.codex/skills, ...). */
+export async function listSkills(baseUrl: string, apiKey: string, signal?: AbortSignal): Promise<Skill[]> {
+  const response = await fetch(endpoint(baseUrl, "skills"), { headers: headers(apiKey), signal })
+  if (!response.ok) throw new Error(await responseError(response))
+  const body = (await response.json()) as { data?: unknown }
+  return (Array.isArray(body.data) ? body.data : [])
+    .filter((item): item is Skill => !!item && typeof item.name === "string")
+    .map(({ name, description, source }) => ({ name, description: typeof description === "string" ? description : "", source }))
+}
+
 export async function listModels(baseUrl: string, apiKey: string, signal?: AbortSignal) {
   return (await listModelInfo(baseUrl, apiKey, signal)).map((model) => model.id)
 }
@@ -247,6 +265,8 @@ export interface StreamChatOptions {
      so it reuses that state instead of prefilling the turn again, and the model sees
      what it thought (#382); a template that drops it drops it on the server */
   keepReasoning?: boolean
+  /* Agent Skills turned on for this conversation, colibrì only (GET /v1/skills) */
+  skills?: string[]
   signal: AbortSignal
   onDelta: (text: string) => void
   onReasoning?: (text: string) => void
@@ -279,6 +299,7 @@ export async function streamChat(options: StreamChatOptions): Promise<StreamChat
       /* A conversation longer than the context goes on, on a summary of its
          first messages, instead of ending in "maximum context length". */
       ...(options.compact ? { context_compaction: "auto" } : {}),
+      ...(options.skills?.length ? { skills: options.skills } : {}),
       stream: true,
       stream_options: { include_usage: true },
     }),

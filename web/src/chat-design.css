@@ -225,3 +225,7 @@ button{color:inherit}button:disabled{cursor:default;opacity:.4}svg.lucide{stroke
 }
 .scroll-bottom{position:absolute;top:-46px;left:50%;transform:translateX(-50%);z-index:3;width:34px;height:34px;display:flex;align-items:center;justify-content:center;border:1px solid var(--border);border-radius:50%;background:var(--card);color:var(--foreground);box-shadow:0 6px 20px #0003}.scroll-bottom svg{width:16px;height:16px}
 .export-wrap{position:relative}.export-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:grid;min-width:170px;padding:6px;border:1px solid var(--border);border-radius:12px;background:var(--card);box-shadow:0 12px 40px #0004}.export-menu button{display:flex;align-items:center;gap:9px;border:0;border-radius:8px;background:none;color:var(--foreground);padding:9px 10px;font-size:12px;text-align:left}.export-menu button:hover{background:var(--secondary)}.export-menu svg{width:14px;height:14px}
+
+.skills-picker{position:relative;cursor:pointer}
+.skills-picker select{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%}
+.skill-chip svg{width:13px;height:13px}

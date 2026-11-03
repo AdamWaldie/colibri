@@ -26,6 +26,7 @@ import http.client
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -1264,6 +1265,29 @@ def saved_ctx(cfg):
     return 0
 
 
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+KEY_RE = re.compile(r"^[A-Za-z0-9._-]{16,200}$")
+
+
+def network_key(host, old_env=None, make=None):
+    """The API key a server reachable from the network runs with, or None on this
+    PC only. The server refuses a non-loopback address without one (#SEC-6), so a
+    setup for the network makes one: kept from the last setup when there is one
+    (apps already hold it), else new and random."""
+    if host in LOOPBACK:
+        return None
+    old = (old_env or {}).get("COLI_API_KEY")
+    if isinstance(old, str) and KEY_RE.match(old):
+        return old
+    return (make or secrets.token_urlsafe)(24)
+
+
+def api_key(cfg):
+    """The key the configured server checks: COLI_API_KEY in this environment wins,
+    as it does when `coli start` runs the server; else the one the setup saved."""
+    return os.environ.get("COLI_API_KEY") or ((cfg or {}).get("env") or {}).get("COLI_API_KEY") or None
+
+
 def make_config(*, model_dir, family, entry, engine_info, hw, host, port, status="ready", ctx=0):
     backend = engine_info["backend"]
     return {
@@ -1355,9 +1379,12 @@ def _pid_alive(pid):
         return False
 
 
-def _get_json(url, timeout=2.0, *, require_colibri=False):
+def _get_json(url, timeout=2.0, *, require_colibri=False, key=None):
+    request = urllib.request.Request(url)
+    if key:
+        request.add_header("Authorization", f"Bearer {key}")
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             if require_colibri and (response.headers.get("Server") or "").split()[:1] != ["colibri"]:
                 return response.status, None
             return response.status, json.loads(response.read().decode("utf-8") or "{}")
@@ -1428,7 +1455,8 @@ def server_status(cfg):
         pid = None
     alive = _pid_alive(pid)
     shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
-    code, health = _get_json(f"http://{shown}:{port}/health", require_colibri=True)
+    key = api_key(cfg)
+    code, health = _get_json(f"http://{shown}:{port}/health", require_colibri=True, key=key)
     if code == 200 and isinstance(health, dict) and health.get("status") == "ok":
         state = "ready"
     elif alive:
@@ -1440,14 +1468,16 @@ def server_status(cfg):
            "backend": cfg.get("backend"), "model_id": None, "tokens_per_second": None,
            "last_turn": None}
     if state == "ready":
-        _, profile = _get_json(f"http://{shown}:{port}/profile")
+        _, profile = _get_json(f"http://{shown}:{port}/profile", key=key)
         turns = (profile or {}).get("turns") or []
         if turns:
             out["last_turn"] = turns[-1]
             out["tokens_per_second"] = last_turn_speed(profile)
         if health and health.get("arch"):
             out["arch"] = health["arch"]
-        _, models = _get_json(f"http://{shown}:{port}/v1/models")
+        live = health.get("live") if health else None
+        out["live"] = [turn for turn in live if isinstance(turn, dict)] if isinstance(live, list) else []
+        _, models = _get_json(f"http://{shown}:{port}/v1/models", key=key)
         data = (models or {}).get("data") or []
         if data and isinstance(data[0], dict):
             out["model_id"] = data[0].get("id")
@@ -1573,6 +1603,10 @@ def print_urls(cfg, out=print):
     out(f"  Browser:             {link['browser']}")
     out(f"  OpenAI base URL:     {link['openai_base_url']}")
     out(f"  Anthropic base URL:  {link['anthropic_base_url']}")
+    key = api_key(cfg)
+    if key:
+        out(f"  API key:             {key}   (other computers: use this PC's address; "
+            "apps send the key as their API key)")
 
 
 def stop_server(cfg, out=print):
@@ -2197,6 +2231,9 @@ def cmd_setup(a, ui=None):
     cfg = make_config(model_dir=model_dir, family=family, entry=entry, engine_info=engine_info,
                       hw=hw, host=host, port=port, ctx=ctx)
     cfg["requested_backend"] = requested
+    key = network_key(host, (resume or {}).get("env"))
+    if key:
+        cfg["env"]["COLI_API_KEY"] = key
     # A GPU this setup found but could not build for: a rerun checks whether
     # the packages arrived and rebuilds (gpu_now_buildable).
     cfg["gpu_pending"] = ([kind for kind, _hint in decision["missing"]]

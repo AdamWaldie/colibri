@@ -29,6 +29,8 @@ const en: Record<string, string> = {
   "ui.attachImage": "Attach an image",
   "ui.attachFile": "Attach images or documents (PDF, Word, Excel, PowerPoint, text, code...)",
   "ui.removeFile": "Remove document",
+  "skills.menu": "Skills: turn one on for this chat (or type /name)",
+  "skills.remove": "Turn off the {{name}} skill",
   "ui.removeImage": "Remove image",
   "ui.attachedImage": "Attached image {{n}}",
   "ui.copied": "Copied",

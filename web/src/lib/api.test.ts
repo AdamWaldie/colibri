@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import {
   askSystemOne, extractSSE, extractSSEEvents, generateImage, generatesImages, getHealth, getProfile,
-  listModelInfo, serverEndpoint, streamChat, type GenerateImageOptions, type ImageProgress,
+  listModelInfo, listSkills, serverEndpoint, streamChat, type GenerateImageOptions, type ImageProgress,
 } from "./api"
 
 afterEach(() => vi.unstubAllGlobals())
@@ -59,7 +59,7 @@ describe("chat request extensions", () => {
     headers: { "content-type": "text/event-stream" },
   })
 
-  async function requestBody(cacheSlot?: number, compact?: boolean, maxTokens: number | null = 8) {
+  async function requestBody(cacheSlot?: number, compact?: boolean, maxTokens: number | null = 8, skills?: string[]) {
     const fetchMock = vi.fn().mockResolvedValue(completedStream())
     vi.stubGlobal("fetch", fetchMock)
     await streamChat({
@@ -72,11 +72,28 @@ describe("chat request extensions", () => {
       enableThinking: false,
       cacheSlot,
       compact,
+      skills,
       signal: new AbortController().signal,
       onDelta: () => undefined,
     })
     return JSON.parse(fetchMock.mock.calls[0][1].body as string) as Record<string, unknown>
   }
+
+  it("sends the skills turned on, and nothing when none are", async () => {
+    expect(await requestBody(undefined, undefined, 8, ["code-review"])).toMatchObject({ skills: ["code-review"] })
+    expect(await requestBody(undefined, undefined, 8, [])).not.toHaveProperty("skills")
+    expect(await requestBody()).not.toHaveProperty("skills")
+  })
+
+  it("lists the server's skills, keeping only well-formed ones", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [
+      { name: "pdf", description: "Fill forms", source: "/h/.claude/skills" }, { nope: 1 }, { name: "bare" },
+    ] }), { status: 200 }))
+    vi.stubGlobal("fetch", fetchMock)
+    expect(await listSkills("http://x/v1", "k")).toEqual([
+      { name: "pdf", description: "Fill forms", source: "/h/.claude/skills" }, { name: "bare", description: "", source: undefined }])
+    expect(fetchMock.mock.calls[0][0]).toBe("http://x/v1/skills")
+  })
 
   it("omits cache_slot for a generic OpenAI-compatible backend", async () => {
     expect(await requestBody()).not.toHaveProperty("cache_slot")

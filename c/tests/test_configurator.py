@@ -217,6 +217,17 @@ class Usability(unittest.TestCase):
         self.assertIn("Press Start", configurator.server_words({"state": "stopped"}, cfg)[1])
         self.assertIn("not finished", configurator.server_words(None, {"status": "pending"})[1])
 
+    def test_live_speed_in_the_status_strip(self):
+        cfg = {"status": "ready", "model": {"name": "Q"}}
+        writing = {"state": "writing", "tok_s": 6.2, "tok_s_now": 7.48, "tokens": 120, "prompt_tokens": 900}
+        reading = {"state": "reading", "elapsed_s": 41.6, "prompt_tokens": 18000, "tokens": 0}
+        words = configurator.server_words({"state": "ready", "live": [writing], "tokens_per_second": 5}, cfg)[1]
+        self.assertEqual(words, "Running: Q  (writing: 7.5 tok/s, 120 tokens)")
+        self.assertIn("reading a 18000-token prompt: 42s (+1 more)",
+                      configurator.server_words({"state": "ready", "live": [writing, reading]}, cfg)[1])
+        self.assertIn("5 tok/s last answer",
+                      configurator.server_words({"state": "ready", "live": [], "tokens_per_second": 5}, cfg)[1])
+
     def test_why_an_app_cannot_be_opened(self):
         import agent_connect
         claude = agent_connect.tool("claude")
@@ -268,6 +279,86 @@ class OpenAppMenu(unittest.TestCase):
     def test_waiting_words(self):
         self.assertIn("2:05", configurator.waiting_words("Codex CLI", 125))
         self.assertIn("Codex CLI", configurator.waiting_words("Codex CLI", 0))
+
+
+class CodingContext(unittest.TestCase):
+    """Set up for coding apps: the largest of 131072 / 65536 whose conversation state
+    fits in 40% of the memory there is."""
+    GiB = 10 ** 9
+
+    def fake(self, per_token, max_context=262144, family="qwen36"):
+        from types import SimpleNamespace as NS
+        resolved = NS(descriptor=NS(id=family, display_name="Fake", limits=NS(max_context=max_context)))
+        geometry = lambda r, step: NS(context_state_bytes=step * per_token, workspace_bytes=0)  # noqa: E731
+        return (lambda path: resolved), geometry
+
+    def test_131k_when_it_fits(self):
+        resolve, geometry = self.fake(per_token=50_000)            # 131072 tokens: 6.6 GB
+        ctx, words = configurator.coding_context("m", available=32 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertEqual(ctx, 131072)
+        self.assertIn("131,072 tokens", words)
+
+    def test_65k_when_only_that_fits(self):
+        resolve, geometry = self.fake(per_token=50_000)            # 6.6 GB > 40% of 12 GB; 3.3 GB fits
+        self.assertEqual(configurator.coding_context("m", available=12 * self.GiB,
+                                                     resolve=resolve, geometry=geometry)[0], 65536)
+
+    def test_nothing_fits_suggests_a_smaller_model(self):
+        resolve, geometry = self.fake(per_token=200_000)           # 65536 tokens: 13 GB
+        ctx, words = configurator.coding_context("m", available=16 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertIsNone(ctx)
+        self.assertIn("smaller model", words)
+
+    def test_a_model_that_cannot_reach_65k(self):
+        resolve, geometry = self.fake(per_token=1, max_context=32768)
+        ctx, words = configurator.coding_context("m", available=64 * self.GiB, resolve=resolve, geometry=geometry)
+        self.assertIsNone(ctx)
+        self.assertIn("32,768", words)
+
+    def test_a_family_capped_at_65k_gets_65k(self):
+        resolve, geometry = self.fake(per_token=1, max_context=65536)
+        self.assertEqual(configurator.coding_context("m", available=64 * self.GiB,
+                                                     resolve=resolve, geometry=geometry)[0], 65536)
+
+    def test_the_real_planner_on_a_tiny_model(self):
+        here = os.path.join(configurator.HERE, "mimo_tiny")
+        ctx, words = configurator.coding_context(here, available=64 * self.GiB)
+        self.assertEqual(ctx, 131072)
+        self.assertIn("conversation memory", words)
+
+    def test_advice(self):
+        self.assertIn("Start the server", configurator.coding_advice(None))
+        self.assertIn("too small", configurator.coding_advice(32768))
+        self.assertIn("enough", configurator.coding_advice(65536))
+        self.assertIn("ready", configurator.coding_advice(131072))
+
+
+
+class SpeedTuning(unittest.TestCase):
+    CFG = {"model_dir": "D:/models/qwen", "launcher": "C:/colibri/coli", "env": {"COLI_VULKAN": "1"},
+           "args": ["web", "--model", "D:/models/qwen", "--host", "127.0.0.1", "--port", "8000",
+                    "--gpu", "auto", "--auto-tier", "--ctx", "65536"]}
+
+    def test_tune_command_runs_what_start_runs(self):
+        cmd, extra = configurator.tune_command(self.CFG, "py.exe", coli="C:/colibri/coli")
+        self.assertEqual(cmd, ["py.exe", "C:/colibri/coli", "tune", "--model", "D:/models/qwen",
+                               "--gpu", "auto", "--ctx", "65536"])
+        self.assertEqual(extra, {"COLI_VULKAN": "1"})
+        cmd, _ = configurator.tune_command({"model_dir": "M", "args": []}, "py", coli="coli")
+        self.assertEqual(cmd[3:], ["--model", "M"])
+
+    def test_tune_result(self):
+        accepted = ("\x1b[2m  · measuring\x1b[0m\n  \x1b[38;5;78m✓ accepted\x1b[0m cap-24: 4.10 → 5.02 tok/s "
+                    "(+22.4%)\n  profile: x.json\n")
+        words, faster = configurator.tune_result(accepted, 0)
+        self.assertTrue(faster)
+        self.assertIn("4.10 -> 5.02 tok/s (+22.4%), with cap-24", words)
+        words, faster = configurator.tune_result("  ✓ baseline retained: no candidate cleared", 0)
+        self.assertFalse(faster)
+        self.assertIn("already runs the model at its fastest", words)
+        words, _ = configurator.tune_result("banner\ntuning failed: engine exited 3\n", 1)
+        self.assertEqual(words, "Tuning stopped: tuning failed: engine exited 3. Nothing was changed.")
+        self.assertIn("Show output", configurator.tune_result("", 0)[0])
 
 
 if __name__ == "__main__":

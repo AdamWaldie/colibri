@@ -25,22 +25,23 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Camera, Grid3x3, Palette, FileText, Paperclip} from "lucide-react"
+  Zap, ImagePlus, Camera, Grid3x3, Palette, FileText, Paperclip, Sparkles} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
-  generateImage, generatesImages, getHealth, listModelInfo, streamChat,
-  type AttachedDocument, type ChatMessage, type GeneratedImage, type HealthResponse, type StreamChatResult,
+  generateImage, generatesImages, getHealth, listModelInfo, listSkills, streamChat,
+  type AttachedDocument, type Skill, type ChatMessage, type GeneratedImage, type HealthResponse, type StreamChatResult,
 } from "@/lib/api"
 import {
   DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, imageFileName, parseSeed, parseSize,
   presetOf, randomSeed, sizeKey, validSide, type ImageSize,
 } from "@/lib/images"
 import { chatMarkdown, exportName, resendFrom } from "@/lib/chat"
-import { activeRequests, supportsCacheSlots, supportsCompaction, supportsContinuation } from "@/lib/runtime"
+import { activeRequests, supportsCacheSlots, supportsCompaction, supportsContinuation, supportsSkills } from "@/lib/runtime"
+import { slashSkill, withSkill } from "@/lib/skills"
 import Brio from "./Brio"
 import { BrainWorkspace } from "./BrainWorkspace"
 import { Brand } from "./components/Brand"
@@ -112,6 +113,11 @@ export default function App() {
   /* Pictures wait here until the turn is sent, then travel on the message. */
   const [pending, setPending] = useState<string[]>([])
   const [pendingDocs, setPendingDocs] = useState<AttachedDocument[]>([])
+  /* Agent Skills: the ones the server has, and the ones on for this conversation */
+  const [skillList, setSkillList] = useState<Skill[]>([])
+  const [activeSkills, setActiveSkills] = useState<string[]>([])
+  const skillsRef = useRef<string[]>([])
+  skillsRef.current = activeSkills
   /* Size and steps are remembered like the endpoint; the seed is not, because
      a remembered seed would silently draw the same picture again. */
   const [imageSize, setImageSize] = useState<ImageSize>(() => parseSize(stored(localStorage, "colibri.imageSize", "")) || DEFAULT_SIZE)
@@ -290,6 +296,14 @@ export default function App() {
     } catch { setError("status.serverError") }
   }
 
+  const skillsOn = supportsSkills(health)
+  useEffect(() => {
+    if (!connected || !skillsOn) { setSkillList([]); return }
+    const controller = new AbortController()
+    listSkills(baseUrl, apiKey, controller.signal).then(setSkillList).catch(() => setSkillList([]))
+    return () => controller.abort()
+  }, [apiKey, baseUrl, connected, skillsOn])
+
   const canSend = useMemo(() => imageMode
     ? Boolean(draft.trim() && model && !loading && seed !== undefined && validSide(imageSize.width) && validSide(imageSize.height))
     : (draft.trim() || pending.length || pendingDocs.length) && model && !loading, [draft, imageMode, imageSize, loading, model, pending, pendingDocs, seed])
@@ -324,6 +338,7 @@ export default function App() {
         cacheSlot: supportsCacheSlots(health) ? cacheSlot : undefined,
         compact: supportsCompaction(health),
         keepReasoning: supportsCompaction(health),
+        skills: skillsOn ? skillsRef.current : undefined,
         signal: controller.signal,
         /* Reasoning tokens are tokens: they count toward the rate, and the
            first one is the real time-to-first-token. The answer's first token
@@ -377,7 +392,15 @@ export default function App() {
 
   /* consumeDraft is false for regenerate so a follow-up already in the composer is not eaten. */
   const send = async (text = draft, previous = messages, pictures = pending, consumeDraft = true, docs = pendingDocs) => {
-    const content = text.trim()
+    let content = text.trim()
+    /* "/name ..." turns that skill on and sends the rest */
+    const slash = skillsOn ? slashSkill(content, skillList.map(skill => skill.name)) : null
+    if (slash) {
+      skillsRef.current = withSkill(skillsRef.current, slash.name)
+      setActiveSkills(skillsRef.current)
+      content = slash.rest
+      if (!content && !pictures.length && !docs.length) { if (consumeDraft) setDraft(""); return }
+    }
     if ((!content && !pictures.length && !docs.length) || loading) return
     const user = message("user", content, pictures, docs)
     const assistant = message("assistant", "")
@@ -484,6 +507,7 @@ export default function App() {
   const clearChat = () => { updateMessages([]); setLastRun(null); setTokPerSec(null); setTtft(null); setTokenCount(0); setTotalTokens({ prompt: 0, completion: 0 }); setError("") }
   const newChat = () => {
     if (loading) return
+    setActiveSkills([])
     if (messages.length) setArchives(items => [{ id: message("system", "").id, slot: cacheSlot, messages: [...messages] }, ...items])
     clearChat(); setDraft(""); setView("chat"); requestAnimationFrame(() => draftRef.current?.focus())
   }
@@ -644,7 +668,13 @@ export default function App() {
           <form className={cn("composer", imageMode && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
             onDragOver={e => { if (!imageMode && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
             onDrop={e => { if (!imageMode && e.dataTransfer.files.length) { e.preventDefault(); void attach(e.dataTransfer.files) } }}>
-            {!imageMode && (pending.length > 0 || pendingDocs.length > 0) && <div className="composer-attachments">
+            {!imageMode && (pending.length > 0 || pendingDocs.length > 0 || activeSkills.length > 0) && <div className="composer-attachments">
+              {activeSkills.map(name => <span key={`skill-${name}`} className="attachment document-chip skill-chip"
+                title={skillList.find(skill => skill.name === name)?.description || name}>
+                <Sparkles />{name}
+                <button type="button" aria-label={t("skills.remove", { name })} title={t("skills.remove", { name })}
+                  onClick={() => setActiveSkills(list => list.filter(item => item !== name))}><X /></button>
+              </span>)}
               {pendingDocs.map((doc, at) => <span key={`doc-${at}`} className="attachment document-chip" title={doc.name}>
                 <FileText />{doc.name}
                 <button type="button" aria-label={t("ui.removeFile")} title={t("ui.removeFile")}
@@ -664,6 +694,15 @@ export default function App() {
                 onChange={e => { void attach(e.target.files); e.target.value = "" }} />
               <button type="button" className="attach-chip" aria-label={t("ui.attachFile")} title={t("ui.attachFile")}
                 onClick={() => fileRef.current?.click()}><Paperclip /></button>
+              {skillList.length > 0 && <label className="attach-chip skills-picker" title={t("skills.menu")}>
+                <Sparkles />
+                <select aria-label={t("skills.menu")} value=""
+                  onChange={e => { const name = e.target.value; if (name) setActiveSkills(list => withSkill(list, name)) }}>
+                  <option value="">{t("skills.menu")}</option>
+                  {skillList.map(skill => <option key={skill.name} value={skill.name} disabled={activeSkills.includes(skill.name)}>
+                    {skill.name}{skill.description ? ` - ${skill.description.slice(0, 80)}` : ""}</option>)}
+                </select>
+              </label>}
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
               <button type="button" className="slot-chip" onClick={() => openSettings("model")}><Database />{t("topbar.slot", { n: cacheSlot + 1 })}</button>
               </>}

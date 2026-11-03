@@ -71,6 +71,50 @@ Codex bridge is started when needed, and the app opens in a terminal in your pro
 folder, already connected. The folder is asked the first time and remembered (change
 it at the bottom of the same menu). Apps that are not installed are listed greyed.
 
+**Updates** (This PC tab) says whether a newer colibri is out, checked when the
+window opens (at most once a day) or on demand. In a git clone it lists the new
+commits of the branch you follow and **Update now** brings them in with `git pull
+--ff-only` (it never merges and never overwrites a file you edited: it refuses and
+says why), stops and restarts a running server, and rebuilds the engine from the new
+code (only what changed). A release folder is compared with the latest release, and
+**Open the download page** fetches the new one: unpack it over the folder with colibri
+stopped.
+
+**Other computers on the network:** set Address to `0.0.0.0` in step 3 (Options) and
+press Install. The server refuses to be reachable from the network without an API key,
+so the setup makes one.
+- The key is random and saved with the setup (`COLI_API_KEY` in `setup.json`), so
+  `coli start`, START-HERE.bat and the window all run with it.
+- Running setup again keeps the same key, so apps that already have it keep working.
+- Setting the address back to `127.0.0.1` removes it.
+- A `COLI_API_KEY` set in your own environment wins over the saved one, as it always did.
+- Connect apps fills in the key, and shows the address other computers use (for example
+  `http://192.168.1.20:8000/v1`).
+- `coli setup` and `coli start` print the key with the URLs.
+- The browser chat asks for it in its API key field.
+- Windows may ask once to let colibri through the firewall. Allow it on private
+  networks only.
+
+**Speed** (This PC tab) has **Tune speed**, which runs `coli tune` on the installed
+model with the same model, GPU and context settings `coli start` uses.
+- It tries only settings that don't change the answers (how the expert cache and
+  threads are used), and keeps the fastest if it beats the current one by at least 3%.
+- The result is saved as a profile, and every later start uses it.
+- It takes a few minutes. A running server is stopped first and started again
+  afterwards.
+- The window shows the before and after speed, or that nothing was faster.
+
+While the server runs, the top bar shows the answer being written right now: its
+speed over the last tokens, or how long the prompt has been read so far. Once the
+answer is done, the bar shows the last answer's speed instead.
+
+**Set up for coding apps** (top of Connect apps) gives Claude Code and Codex the
+context they need: it shows the server's context and whether it is enough (65,536
+tokens at least), and on a press works out, with colibri's own planner for this
+model, the largest of 131,072 and 65,536 whose conversation memory fits in 40% of the
+memory there is, sets it (`coli setup --ctx`, no rebuild, no download) and restarts
+the server. When even 65,536 does not fit, it says so and suggests a smaller model.
+
 **Connect apps** uses the running model from a coding app, the way a local
 Ollama is used. The model id and context come from the server's `/v1/models`.
 Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a
@@ -79,8 +123,23 @@ variables, `-c` overrides (Codex) or a HERMES_HOME under the setup folder, never
 their own settings. Codex speaks only the Responses API, so it goes through
 `coli ui` on port 8790 (started for you). Each app also shows the lines to paste
 for a permanent setup; T3 Code (which runs Codex or Claude Code) and any
-OpenAI-compatible app (Continue, Cline, aider, crush, pi, OpenClaw, ...) get the
+OpenAI-compatible app (aider, crush, pi, OpenClaw, ...) get the
 base URL, key and model to enter. See [api.md](api.md#connect-a-coding-cli-or-editor).
+
+The VS Code extensions are in the list too, marked installed when VS Code, Cursor,
+VSCodium or Windsurf has them. **Write settings** sets them up:
+
+- **Continue**: adds colibri to the `models:` list in
+  `%USERPROFILE%\.continue\config.yaml`, with the context, the output length and
+  tool use for Agent mode. The old file is kept as `config.yaml.colibri-backup`, and
+  writing again replaces only colibri's own entry, which sits between two marker
+  comments. A Continue setup that still uses the older `config.json` is left
+  alone, and the entry is shown for you to add.
+- **Roo Code**: writes `roo-code-colibri.json` in the setup folder's `agents`.
+  Load it with Settings, Import in Roo Code. It adds a "colibri" provider profile
+  and keeps your others.
+- **Cline**: it has no settings file, so it shows the values to type into its
+  "OpenAI Compatible" provider.
 
 **This PC** shows the hardware report and where colibri keeps its files;
 **Details** the saved `setup.json`, the server and install logs.

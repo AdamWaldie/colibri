@@ -31,6 +31,7 @@ flashes on screen.
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -50,6 +51,7 @@ import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
 import setup_flow  # noqa: E402
 import setup_hw  # noqa: E402
+import updater  # noqa: E402
 import win_shortcuts  # noqa: E402
 
 GB = setup_catalog.GB
@@ -292,13 +294,26 @@ def plan_lines(options, row=None, free=None):
                  + ("an automatic context." if ctx in ("", "0") else f"a {ctx}-token context."))
     if host in ("0.0.0.0", "::"):
         warnings.append("Address 0.0.0.0 makes the server reachable from other computers on the "
-                        "network; start it with COLI_API_KEY set to require a key.")
+                        "network: the setup makes an API key the server then requires (Connect apps "
+                        "shows it). Windows may ask to let it through the firewall: private networks only.")
     if options.get("start", "background") == "background":
         lines.append("Then start the server in the background"
                      + ("." if options.get("no_browser") else " and open the chat in the browser."))
     else:
         lines.append("Then stop: start it later with Start at the top.")
     return lines, warnings
+
+
+def live_words(live):
+    """The answers being written right now, for the status strip: the newest one's
+    rate over its last tokens (what it does now), else that it is reading the prompt."""
+    turn = live[-1]
+    more = f" (+{len(live) - 1} more)" if len(live) > 1 else ""
+    if turn.get("state") == "writing":
+        rate = turn.get("tok_s_now") or turn.get("tok_s") or 0
+        return f"(writing: {rate:.1f} tok/s, {turn.get('tokens', 0)} tokens{more})"
+    return (f"(reading a {turn.get('prompt_tokens', 0)}-token prompt: "
+            f"{turn.get('elapsed_s', 0):.0f}s{more})")
 
 
 def server_words(server, cfg):
@@ -310,11 +325,109 @@ def server_words(server, cfg):
         return "orange", f"{name}: setup not finished. Install continues where it stopped"
     state = (server or {}).get("state")
     if state == "ready":
+        live = server.get("live") or []
+        if live:
+            return "green", f"Running: {name}  " + live_words(live)
         speed = server.get("tokens_per_second")
         return "green", f"Running: {name}" + (f"  ({speed} tok/s last answer)" if speed else "")
     if state == "loading":
         return "orange", f"Loading {name}... (large models take minutes)"
     return "grey", f"Stopped: {name} is set up. Press Start"
+
+
+TUNE_KEEP = ("--model", "--gpu", "--ctx", "--ram", "--vram", "--policy")
+
+
+def tune_command(cfg, python, coli=None):
+    """`coli tune` for the model and the resources `coli start` runs it with, so the
+    profile it saves is the one the next start loads (the run's --auto-tier applies
+    it). (command, environment additions)."""
+    args, keep, i = list(cfg.get("args") or []), [], 0
+    while i < len(args):
+        if args[i] in TUNE_KEEP and i + 1 < len(args):
+            keep += args[i:i + 2]
+            i += 2
+            continue
+        i += 1
+    if "--model" not in keep:
+        keep = ["--model", cfg.get("model_dir") or ""] + keep
+    return [python, coli or COLI, "tune"] + keep, dict(cfg.get("env") or {})
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+TUNE_ACCEPTED_RE = re.compile(r"accepted\s+(.+?):\s+([0-9.]+)\s*\S+\s*([0-9.]+)\s*tok/s\s*\(\+([0-9.]+)%\)")
+
+
+def tune_result(output, code):
+    """(words for the window, faster) from `coli tune`'s output and exit code."""
+    text = ANSI_RE.sub("", output or "")
+    found = TUNE_ACCEPTED_RE.search(text)
+    if code == 0 and found:
+        name, before, after, gain = found.groups()
+        return (f"Tuned: {before} -> {after} tok/s (+{gain}%), with {name}. Every start "
+                "uses it from now on."), True
+    if code == 0 and "baseline retained" in text:
+        return ("Measured: this PC already runs the model at its fastest safe settings, so "
+                "nothing changed."), False
+    if code == 0:
+        return "Tuning finished: the output (Show output) has the numbers.", False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    reason = next((line for line in reversed(lines) if "failed" in line or "cannot" in line),
+                  lines[-1] if lines else "")
+    return f"Tuning stopped: {reason or 'see Show output'}. Nothing was changed.", False
+
+
+CODING_STEPS = (131072, 65536)      # what Claude Code and Codex want, then what they need
+CODING_MIN = 65536
+CODING_SHARE = 0.40                 # of the memory there is, for the conversation state
+
+
+def coding_context(model_dir, available=None, resolve=None, geometry=None):
+    """(context, words) for coding apps on this model and this PC: 131072 when its
+    conversation state fits in CODING_SHARE of the memory there is (Claude Code can
+    then compact by itself), else 65536 (the least Claude Code and Codex work with),
+    else (None, why and what to do instead). The state is the model's own, from the
+    planner colibri sizes its server with (resource_plan)."""
+    import family_registry
+    import resource_plan
+    resolve = resolve or family_registry.resolve_model
+    geometry = geometry or family_registry.planner_geometry
+    if available is None:
+        available = resource_plan.memory_available()
+    resolved = resolve(model_dir)
+    family = resolved.descriptor
+    limit = family.limits.max_context
+    if limit < CODING_MIN:
+        return None, (f"{family.display_name} holds at most {limit:,} tokens; Claude Code and Codex "
+                      f"need {CODING_MIN:,}. Choose a model with a longer context.")
+    need_at = {}
+    for step in CODING_STEPS:
+        if step > limit:
+            continue
+        g = geometry(resolved, step)
+        need = g.context_state_bytes + (g.workspace_bytes
+                                        if family.id in resource_plan.CHAT_CONTEXT_WORKSPACE else 0)
+        need_at[step] = need
+        if need <= CODING_SHARE * available:
+            return step, (f"{step:,} tokens: {setup_hw.fmt_gb(need)} of conversation memory, of "
+                          f"{setup_hw.fmt_gb(available)} available")
+    need = need_at.get(CODING_MIN)
+    return None, (f"{CODING_MIN:,} tokens would take {setup_hw.fmt_gb(need)} of conversation memory, "
+                  f"more than this PC can spare ({setup_hw.fmt_gb(available)} available). A smaller "
+                  "model (Qwen3-Coder-30B, Qwen3.6-35B) suits coding apps here.")
+
+
+def coding_advice(ctx):
+    """One line on whether the server's context suits coding apps."""
+    if not ctx:
+        return "Start the server to see its context."
+    if ctx < CODING_MIN:
+        return (f"Context {ctx:,} tokens: too small for Claude Code and Codex (they need "
+                f"{CODING_MIN:,}). Press Set up for coding apps.")
+    if ctx < max(CODING_STEPS):
+        return (f"Context {ctx:,} tokens: enough for Claude Code and Codex. "
+                f"{max(CODING_STEPS):,} would also let Claude Code compact by itself.")
+    return f"Context {ctx:,} tokens: ready for coding apps."
 
 
 def app_menu_items(found, platform):
@@ -341,6 +454,9 @@ def waiting_words(name, seconds):
 def open_reason(entry, exe, platform, served):
     """'' when the app can be opened from the window, else why not, in words."""
     if not entry["launch"]:
+        if entry.get("write"):
+            return ("Write settings adds colibri to this app's configuration (a copy of the old "
+                    "file is kept), or follow the instructions on the right.")
         return "Follow the instructions on the right for this app."
     if platform != "win32":
         return "Opening a terminal is for Windows; use the commands on the right."
@@ -812,13 +928,19 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
               text="Like a local Ollama: while the server runs, these apps can use it instead of a cloud "
                    "model. Pick an app; Open in terminal starts it in your project already connected, "
                    "without changing its own settings.").pack(anchor="w")
+    coding_row = ttk.Frame(t_apps)
+    coding_row.pack(fill="x", pady=(6, 0))
+    coding_info = ttk.Label(coding_row, text="", wraplength=760, justify="left")
+    coding_info.pack(side="left", fill="x", expand=True)
+    b_coding = ttk.Button(coding_row, text="Set up for coding apps", command=lambda: set_up_coding())
+    b_coding.pack(side="right")
     head = ttk.Frame(t_apps)
     head.pack(fill="x", pady=(8, 0))
     ttk.Label(head, text="Model").pack(side="left")
     app_model = ttk.Combobox(head, textvariable=v_app_model, width=30)
     app_model.pack(side="left", padx=(4, 12))
     ttk.Label(head, text="API key").pack(side="left")
-    ttk.Entry(head, textvariable=v_app_key, width=12).pack(side="left", padx=(4, 12))
+    ttk.Entry(head, textvariable=v_app_key, width=34).pack(side="left", padx=(4, 12))
     ttk.Button(head, text="Refresh", command=lambda: refresh_apps()).pack(side="left")
     app_server = ttk.Label(head, text="", style="Hint.TLabel")
     app_server.pack(side="left", padx=10)
@@ -849,6 +971,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_app_open.pack(side="left", padx=(12, 4))
     b_bridge = ttk.Button(foot, text="Start Codex bridge", command=lambda: start_bridge())
     b_bridge.pack(side="left")
+    b_app_write = ttk.Button(foot, text="Write settings", command=lambda: write_app_settings())
+    b_app_write.pack(side="left", padx=(4, 0))
     ttk.Button(foot, text="Copy instructions", command=lambda: (
         root.clipboard_clear(), root.clipboard_append(app_text.get("1.0", "end-1c")))).pack(side="left", padx=4)
     app_reason = ttk.Label(t_apps, text="", style="Hint.TLabel")
@@ -881,6 +1005,33 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_sc_add.pack(side="left")
     b_sc_remove = ttk.Button(sc_row, text="Remove the shortcuts", command=lambda: shortcuts("remove"))
     b_sc_remove.pack(side="left", padx=6)
+    up_box = ttk.LabelFrame(t_pc, text="Updates", padding=8)
+    up_box.pack(fill="x", pady=(6, 0))
+    up_info = ttk.Label(up_box, text="", wraplength=900, justify="left")
+    up_info.pack(anchor="w")
+    up_row = ttk.Frame(up_box)
+    up_row.pack(anchor="w", pady=(6, 0))
+    ttk.Button(up_row, text="Check for updates", command=lambda: check_updates()).pack(side="left")
+    b_update = ttk.Button(up_row, text="Update now", state="disabled", command=lambda: update_now())
+    b_update.pack(side="left", padx=6)
+    b_download = ttk.Button(up_row, text="Open the download page", state="disabled",
+                            command=lambda: webbrowser.open(lib_state.get("updates", {}).get("url")
+                                                            or updater.RELEASES_PAGE))
+
+    sp_box = ttk.LabelFrame(t_pc, text="Speed", padding=8)
+    sp_box.pack(fill="x", pady=(6, 0))
+    sp_info = ttk.Label(sp_box, wraplength=900, justify="left",
+                        text="Tune speed measures this model on this PC with a few safe settings "
+                             "(how the expert cache and threads are used; never anything that "
+                             "changes the answers) and keeps the fastest. It takes a few minutes, and "
+                             "the server is stopped meanwhile.")
+    sp_info.pack(anchor="w")
+    if (lib_state["prefs"].get("last_tune") or {}).get("words"):
+        sp_info.configure(text=sp_info.cget("text") + "\nLast time: " + lib_state["prefs"]["last_tune"]["words"])
+    sp_row = ttk.Frame(sp_box)
+    sp_row.pack(anchor="w", pady=(6, 0))
+    b_tune = ttk.Button(sp_row, text="Tune speed", command=lambda: tune_speed())
+    b_tune.pack(side="left")
 
     # Details
     t_cur = tab(" Details ")
@@ -1166,7 +1317,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set({"setup": "Installing...", "start": "Starting the server...",
                       "stop": "Stopping the server...", "import": "Importing the GGUF...",
                       "use": "Switching to the model...",
-                      "fetch": "Getting the model..."}.get(kind, "Working..."))
+                      "fetch": "Getting the model...",
+                      "tune": "Tuning the speed (a few minutes)..."}.get(kind, "Working..."))
         if kind == "show":
             show_output()
 
@@ -1224,8 +1376,21 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     def app_conn():
         found = dict(state["apps_models"])
         model = v_app_model.get().strip() or None
-        return agent_connect.connection(state["cfg"], model=model, ctx=found.get(model),
-                                        key=v_app_key.get().strip() or "local")
+        cfg = state["cfg"] or {}
+        lan = state.get("lan") if (cfg.get("host") or "") in ("0.0.0.0", "::", "") else None
+        return agent_connect.connection(cfg, model=model, ctx=found.get(model),
+                                        key=v_app_key.get().strip() or None, lan=lan)
+
+    def sync_key(cfg):
+        """The API key box follows the setup's key (a server on the network requires it),
+        unless the user typed another one."""
+        key = setup_flow.api_key(cfg) or "local"
+        if key != state.get("synced_key") and v_app_key.get().strip() in ("", "local",
+                                                                            state.get("synced_key")):
+            v_app_key.set(key)
+        state["synced_key"] = key
+        if (cfg.get("host") or "") in ("0.0.0.0", "::", "") and "lan" not in state:
+            state["lan"] = agent_connect.lan_address()
 
     def show_app(*_):
         sel = app_list.selection()
@@ -1239,6 +1404,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         b_app_open.configure(state="disabled" if reason else "normal")
         app_reason.configure(text=reason)
         b_bridge.configure(state="normal" if entry.get("bridge") else "disabled")
+        b_app_write.configure(state="normal" if entry.get("write") else "disabled")
 
     app_list.bind("<<TreeviewSelect>>", show_app)
     v_app_model.trace_add("write", show_app)
@@ -1273,6 +1439,25 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set(f"Opened {agent_connect.tool(tool_id)['name']} in a new window.")
         log_write(f"\nopened {agent_connect.tool(tool_id)['name']} ({script})\n")
 
+    def write_app_settings():
+        sel = app_list.selection()
+        if not sel or not agent_connect.tool(sel[0]).get("write"):
+            return
+        entry = agent_connect.tool(sel[0])
+        if not messagebox.askyesno("colibri", f"Write colibri into {entry['name']}'s settings?\n\n"
+                                              "A copy of an existing file is kept beside it."):
+            return
+        try:
+            path, backup, words = agent_connect.write_settings(sel[0], app_conn())
+        except (ValueError, OSError) as error:
+            messagebox.showerror("colibri", str(error))
+            return
+        root.clipboard_clear()
+        root.clipboard_append(path)
+        log_write(f"\nwrote {path}" + (f" (the old one: {backup})" if backup else "") + "\n")
+        v_status.set(f"Wrote {entry['name']}'s settings.")
+        messagebox.showinfo("colibri", words + "\n\n(The file's path is on the clipboard.)")
+
     def start_bridge():
         conn = app_conn()
         try:
@@ -1282,6 +1467,46 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
             return
         v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
+
+    # Set up for coding apps: the context Claude Code and Codex need
+    def set_up_coding():
+        cfg = state["cfg"] or {}
+        if not cfg.get("model_dir") or not state["ready"]:
+            messagebox.showinfo("colibri", "Set up a model first: steps 1 to 4, or My models.")
+            nb.select(t_model)
+            return
+        coding_info.configure(text="Working out the context this PC can give the model...")
+
+        def work():
+            try:
+                events.put(("coding", coding_context(cfg["model_dir"])))
+            except Exception as error:  # an unreadable model: say so, keep the window
+                traceback.print_exc(file=sys.stderr)
+                events.put(("coding", (None, f"Could not size the context: {error}")))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def apply_coding(ctx, words):
+        current = int((state["cfg"] or {}).get("ctx") or 0)
+        if ctx is None:
+            coding_info.configure(text=words)
+            messagebox.showwarning("colibri", words)
+            return
+        if current == ctx:
+            coding_info.configure(text=f"Already set: {words}.")
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", f"Set the context to {words}?\n\nClaude Code and Codex then have room for "
+                           "their instructions and tools, and the setup keeps it for every start."
+                           + ("\n\nThe server restarts to use it." if running else "")):
+            coding_info.configure(text=coding_advice(current or None))
+            return
+        v_ctx.set(str(ctx))
+        restart = (lambda: launch([py, COLI, "stop"], {}, "stop",
+                                  then=lambda: run_coli(["start", "--background", "--no-browser"], "start"))) \
+            if running else None
+        launch([py, COLI, "setup", "--yes", "--ctx", str(ctx), "--no-start"], {}, "setup", then=restart)
 
     # Shortcuts: colibri in the Start menu and on the desktop
     def shortcuts(action):
@@ -1327,6 +1552,96 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                                           "It opens this window, with the colibri icon. "
                                           "(This PC tab: add or remove them later.)"):
             shortcuts("create")
+
+    # Updates: a newer colibri, and bringing this one up to date
+    def check_updates(quiet=False):
+        up_info.configure(text="Checking for updates...")
+        b_update.configure(state="disabled")
+
+        def work():
+            try:
+                events.put(("updates", (updater.check(), quiet)))
+            except Exception as error:  # a check never stops the window
+                events.put(("updates", ({"kind": "error", "words": f"Could not check: {error}",
+                                         "can_update": False}, quiet)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_updates(result, quiet):
+        lib_state["updates"] = result
+        lib_state["prefs"]["last_update_check"] = time.time()
+        save_prefs(lib_state["prefs"])
+        up_info.configure(text=f"colibri {result.get('version', '?')}. {result['words']}")
+        b_update.configure(state="normal" if result.get("can_update") and state["proc"] is None else "disabled")
+        b_update.pack_forget() if result.get("kind") == "release" else b_update.pack(side="left", padx=6)
+        b_download.configure(state="normal" if result.get("kind") == "release" else "disabled")
+        if result.get("can_update") or result.get("newer"):
+            v_status.set("A colibri update is available: This PC tab, Updates.")
+
+    def update_now():
+        result = lib_state.get("updates") or {}
+        if not result.get("can_update"):
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", "Update colibri now?\n\n" + result["words"] + "\n\nThe engine is rebuilt from the "
+                           "new code (only what changed)" + ("; the server stops and starts again." if running
+                                                              else ".")):
+            return
+
+        def done():
+            v_status.set("Updated. Close and open this window again to use its new version too.")
+            check_updates(quiet=True)
+
+        def rebuild():
+            then = (lambda: run_coli(["start", "--background", "--no-browser"], "start")) if running else done
+            if state["ready"]:
+                launch([py, COLI, "setup", "--yes", "--no-start"], {}, "setup", then=then)
+            else:
+                then()
+
+        pull = lambda: launch(updater.pull_command(result["root"]), {}, "update", then=rebuild)  # noqa: E731
+        if running:
+            launch([py, COLI, "stop"], {}, "stop", then=pull)
+        else:
+            pull()
+
+    # Speed: `coli tune` on the installed model, the server stopped meanwhile
+    def tune_speed():
+        cfg = state["cfg"] or {}
+        if not cfg.get("model_dir") or not state["ready"]:
+            messagebox.showinfo("colibri", "Set up a model first: steps 1 to 4, or My models.")
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", "Tune colibri's speed for this model on this PC?\n\nIt runs the model a "
+                           "few times with different safe settings and keeps the fastest: a few "
+                           "minutes, with the PC busy." + ("\n\nThe server stops meanwhile and starts "
+                                                          "again afterwards." if running else "")):
+            return
+        cmd, extra = tune_command(cfg, py)
+        state["tune"] = {"out": [], "restart": running}
+
+        def tune():
+            sp_info.configure(text="Tuning... (Show output has the progress)")
+            launch(cmd, extra, "tune")
+
+        if running:
+            launch([py, COLI, "stop"], {}, "stop", then=tune)
+        else:
+            tune()
+
+    def tune_done(code, cancelled):
+        job = state.pop("tune", None) or {}
+        words, faster = tune_result("".join(job.get("out", [])), code)
+        if cancelled:
+            words = "Tuning cancelled. Nothing was changed."
+        sp_info.configure(text=words)
+        lib_state["prefs"]["last_tune"] = {"words": words, "when": time.time()}
+        save_prefs(lib_state["prefs"])
+        v_status.set(words)
+        if job.get("restart"):
+            root.after(100, lambda: run_coli(["start", "--background", "--no-browser"], "start"))
 
     # Open app: one click from the top bar
     def fill_apps_menu():
@@ -1677,6 +1992,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                 kind, payload = events.get_nowait()
                 if kind == "out":
                     log_write(payload)
+                    if state.get("proc_kind") == "tune" and state.get("tune"):
+                        state["tune"]["out"].append(payload)
                 elif kind == "done":
                     what, code = payload
                     state["proc"] = None
@@ -1699,6 +2016,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     refresh_apps()
                     if what in ("import", "use", "setup", "stop", "fetch"):
                         scan_models()
+                    if what == "tune":
+                        tune_done(code, was_cancelled)
                     if then and code == 0 and not was_cancelled:
                         then()
                 elif kind == "app_wait":
@@ -1716,6 +2035,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         refresh_apps()
                     elif not state.get("app_wait_cancel"):
                         v_status.set("The model did not load within an hour: see Details, Server log.")
+                elif kind == "updates":
+                    show_updates(*payload)
+                elif kind == "coding":
+                    apply_coding(*payload)
                 elif kind == "shortcuts":
                     show_shortcuts(*payload)
                 elif kind == "resolved":
@@ -1749,6 +2072,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     changed = (cfg != state["cfg"] or ready != state["ready"]
                                or (server or {}).get("state") != (state["server"] or {}).get("state"))
                     state["cfg"], state["ready"], state["server"] = cfg, ready, server
+                    sync_key(cfg)
                     show_server()
                     update_plan()
                     if changed:
@@ -1778,10 +2102,13 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                                                f"no server at {base}")
                                          + ("; Codex bridge running" if bridge else ""))
                     for entry in agent_connect.TOOLS:
-                        text = ("installed" if found.get(entry["id"]) else "not found") if entry["exe"] else ""
+                        text = (("installed" if found.get(entry["id"]) else "not found")
+                                if entry["exe"] or entry.get("ext") else "")
                         app_list.set(entry["id"], "state", text)
                     show_app()
                     fill_apps_menu()
+                    served_ctx = dict(served).get(v_app_model.get()) if served else None
+                    coding_info.configure(text=coding_advice(served_ctx))
                 elif kind == "error":
                     v_status.set(payload)
                     log_write(payload + "\n")
@@ -1821,6 +2148,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     detect()
     app_list.selection_set("claude")
     scan_models()
+    if time.time() - float(lib_state["prefs"].get("last_update_check") or 0) > 86400:
+        root.after(3000, lambda: check_updates(quiet=True))      # at most once a day, quietly
+    else:
+        up_info.configure(text=f"colibri {setup_flow.current_version()}. Check for updates to see what is new.")
     if sys.platform == "win32":
         shortcuts("status")
         root.after(1500, offer_shortcuts)
