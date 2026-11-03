@@ -90,7 +90,7 @@ def invoked_scripts(path):
 #: "tutto cio' che non e' .py": vedi il docstring in testa.
 DATA_SUFFIXES = frozenset({
     ".json", ".txt", ".csv", ".tsv", ".model", ".bin", ".dat",
-    ".cfg", ".ini", ".yaml", ".yml",
+    ".cfg", ".ini", ".yaml", ".yml", ".ico",
 })
 
 

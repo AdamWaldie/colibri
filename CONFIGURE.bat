@@ -9,8 +9,11 @@ setlocal
 title colibri configurator
 cd /d "%~dp0"
 
-if not exist "%~dp0c\configurator.py" (
-    echo This file belongs at the top of the colibri folder, next to the c folder.
+rem A git clone keeps the window in c\, a release archive next to this file.
+set "COLI_CONF=%~dp0c\configurator.py"
+if not exist "%COLI_CONF%" set "COLI_CONF=%~dp0configurator.py"
+if not exist "%COLI_CONF%" (
+    echo This file belongs in the colibri folder, next to configurator.py or the c folder.
     goto :hold_fail
 )
 
@@ -39,10 +42,10 @@ if /i "%COLI_PY_EXE%"=="py" (
     if exist "%COLI_PY_EXE:python.exe=pythonw.exe%" set "COLI_PYW=%COLI_PY_EXE:python.exe=pythonw.exe%"
 )
 if defined COLI_PYW (
-    start "" "%COLI_PYW%" %COLI_PY_ARG% "%~dp0c\configurator.py" %*
+    start "" "%COLI_PYW%" %COLI_PY_ARG% "%COLI_CONF%" %*
     exit /b 0
 )
-"%COLI_PY_EXE%" %COLI_PY_ARG% "%~dp0c\configurator.py" %*
+"%COLI_PY_EXE%" %COLI_PY_ARG% "%COLI_CONF%" %*
 if errorlevel 1 goto :hold_fail
 exit /b 0
 

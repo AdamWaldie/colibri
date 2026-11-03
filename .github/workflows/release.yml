@@ -193,6 +193,9 @@ jobs:
           # without a model (#1241). coli.cmd is both the double-click entry
           # point and what `coli chat ...` resolves to in cmd/PowerShell.
           if [ "${{ matrix.ext }}" = ".exe" ]; then cp c/coli.cmd dist/; fi
+          # CONFIGURE.bat opens the setup window (configurator.py, packed by
+          # pack_python through `coli configure`), and offers the colibri shortcut.
+          if [ "${{ matrix.ext }}" = ".exe" ]; then cp CONFIGURE.bat dist/; fi
           # I file Python non sono piu' elencati qui. Erano sette, scelti a mano,
           # con i commenti che spiegavano quale importava quale: un inseguimento
           # del codice fatto a occhio, e il codice era avanti. #1296: mancavano
