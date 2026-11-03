@@ -1,0 +1,83 @@
+name: Windows console
+
+# The configurator (CONFIGURE.bat, the colibri shortcut) and the modules it uses run
+# natively on Windows, but the Python test suite in ci.yml runs on Linux only. This
+# runs their tests on a real Windows runner: pythonw.exe without a console, cmd.exe
+# quoting, PowerShell shortcuts, taskkill, Windows paths.
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - 'c/configurator.py'
+      - 'c/agent_connect.py'
+      - 'c/win_shortcuts.py'
+      - 'c/updater.py'
+      - 'c/model_library.py'
+      - 'c/model_fetch.py'
+      - 'c/documents.py'
+      - 'c/skills.py'
+      - 'c/setup_flow.py'
+      - 'c/setup_hw.py'
+      - 'c/tests/test_windows_native.py'
+      - 'CONFIGURE.bat'
+      - '.github/workflows/windows-console.yml'
+  push:
+    branches: [dev, main]
+    paths:
+      - 'c/configurator.py'
+      - 'c/agent_connect.py'
+      - 'c/win_shortcuts.py'
+      - 'c/updater.py'
+      - 'c/model_library.py'
+      - 'c/model_fetch.py'
+      - 'c/documents.py'
+      - 'c/skills.py'
+      - 'c/setup_flow.py'
+      - 'c/setup_hw.py'
+      - 'c/tests/test_windows_native.py'
+      - 'CONFIGURE.bat'
+      - '.github/workflows/windows-console.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  console:
+    name: Configurator on Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: CONFIGURE.bat keeps Windows line endings
+        shell: pwsh
+        run: |
+          $bytes = [IO.File]::ReadAllBytes("CONFIGURE.bat")
+          $lf = ($bytes | Where-Object { $_ -eq 10 }).Count
+          $crlf = ([regex]::Matches([Text.Encoding]::ASCII.GetString($bytes), "`r`n")).Count
+          "LF=$lf CRLF=$crlf"
+          if ($lf -ne $crlf) { throw "CONFIGURE.bat has bare LF line endings: cmd.exe misreads it" }
+      - name: Windows-only behaviour (a real shortcut, cmd.exe launcher, taskkill, the window under pythonw)
+        shell: pwsh
+        working-directory: c
+        run: |
+          $out = python -m unittest discover -s tests -p "test_windows_native.py" -v 2>&1 | Out-String
+          $out
+          if ($LASTEXITCODE -ne 0) { throw "Windows-native tests failed" }
+          if ($out -match "skipped") { throw "a Windows-native test was skipped on Windows" }
+      - name: The console's modules, natively
+        shell: pwsh
+        working-directory: c
+        run: |
+          $failed = @()
+          foreach ($t in "test_configurator", "test_agent_connect", "test_win_shortcuts", "test_updater",
+                         "test_model_library", "test_model_fetch", "test_documents", "test_skills",
+                         "test_setup_flow") {
+            "=== $t"
+            python -m unittest discover -s tests -p "$t.py" 2>&1 | Select-Object -Last 25
+            if ($LASTEXITCODE -ne 0) { $failed += $t }
+          }
+          if ($failed) { throw "failed on Windows: $($failed -join ', ')" }
