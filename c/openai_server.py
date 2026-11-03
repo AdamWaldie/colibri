@@ -24,6 +24,7 @@ import uuid
 import v4_dsml                      # vendored DeepSeek V4 DSML reference primitives
 import v41_dsml                     # ...and V4.1's, whose tag names differ by a space
 import documents                    # PDF, Office, HTML, text: document parts become text
+import skills                       # Agent Skills (SKILL.md) a chat request turns on
 import image_engine                 # the qwenimage serve protocol, PNG and request rules
 from family_registry import (FamilyConfigError, UnknownFamilyError, family_by_id,
                              display_for, family_ids, resolve_model)
@@ -8391,6 +8392,8 @@ class APIHandler(BaseHTTPRequestHandler):
                     payload["continue_assistant"] = os.environ.get("COLI_CONTINUE_ASSISTANT", "1") != "0" and ARCH in CONTINUATION_FAMILIES
                     # chat requests may send context_compaction; the context they fit in
                     payload["context_compaction"] = True
+                    # chat requests may send "skills": the SKILL.md folders this server reads
+                    payload["skills"] = True
                     if getattr(self.server, "context_limit", None):
                         payload["context_tokens"] = self.server.context_limit
                     # the response ceiling a request is lowered to: a client's default
@@ -8447,7 +8450,9 @@ class APIHandler(BaseHTTPRequestHandler):
             if self.serve_static(path):
                 return
             self.require_auth()
-            if path == "/v1/models":
+            if path == "/v1/skills":
+                self.send_json(200, skills.listing(), request_id)
+            elif path == "/v1/models":
                 # `data` is OpenAI's list; `models` is Jev's (name, description,
                 # release_date), which the TypeSafe SDKs' models.list() reads.
                 # has_more / first_id / last_id: Anthropic's list envelope, for the same reason.
@@ -8501,6 +8506,10 @@ class APIHandler(BaseHTTPRequestHandler):
                     documents.expand_body(body)
                 except documents.DocumentError as error:
                     raise APIError(400, str(error), "messages", "invalid_document") from error
+                try:
+                    skills.expand_body(body)
+                except skills.SkillError as error:
+                    raise APIError(400, str(error), "skills", "invalid_skill") from error
             if is_image_engine(self.server.engine) and path in TEXT_ENDPOINTS:
                 raise APIError(400, f"`{self.server.model_id}` is an image generation model and "
                                     "does not chat: POST /v1/images/generations instead.",

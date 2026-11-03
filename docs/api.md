@@ -513,6 +513,39 @@ document's text is cut at `COLI_DOC_MAX_CHARS` (400,000 characters), and
 compressed streams and archive members are read within fixed bounds.
 The web chat's paperclip attaches documents and images the same way.
 
+## Skills (SKILL.md)
+
+The server reads the Agent Skills you already have for Claude Code, Codex and other
+agents. Each skill is a folder holding a `SKILL.md`: YAML front matter with `name` and
+`description`, then the instructions.
+
+The folders it looks in, in order (the first one wins when two skills share a name):
+1. the folders in `COLI_SKILLS_DIRS` (separated by `;` on Windows, `:` elsewhere);
+2. `~/.claude/skills`;
+3. `~/.codex/skills`;
+4. `~/.agents/skills`.
+
+`GET /v1/skills` lists them by name, description and folder. A chat request
+(`/v1/chat/completions`, `/v1/messages`) can turn skills on:
+
+```json
+{"model": "...", "skills": ["code-review"], "messages": [...]}
+```
+
+Those skills' instructions are added to the system prompt, after any system prompt of
+your own, before the model reads the request. An unknown name is refused with a 400.
+`/health` reports `"skills": true` on a server that supports this.
+
+In the web chat:
+- the sparkle button next to the paperclip lists the skills;
+- `/name` at the start of a message turns that skill on and sends the rest of the message;
+- a skill stays on for the conversation, shown as a chip above the message box (the
+  chip's × turns it off), until you start a new chat.
+
+A plain chat has no tools. So the model gets each skill's instructions, but not the
+skill's scripts or other files. Claude Code and Codex connected to colibri run skills
+in full, through their own tool calls (see below).
+
 ## Connect a coding CLI or editor
 
 The API is OpenAI-compatible, so most coding CLIs and editor extensions work by

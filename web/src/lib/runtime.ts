@@ -18,3 +18,8 @@ export function supportsCompaction(health: HealthResponse | null): boolean {
 export function supportsContinuation(health: HealthResponse | null): boolean {
   return health?.continue_assistant === true
 }
+
+/* A colibrì server that turns Agent Skills on for a chat request ("skills"). */
+export function supportsSkills(health: HealthResponse | null): boolean {
+  return health?.skills === true
+}
