@@ -71,6 +71,15 @@ Codex bridge is started when needed, and the app opens in a terminal in your pro
 folder, already connected. The folder is asked the first time and remembered (change
 it at the bottom of the same menu). Apps that are not installed are listed greyed.
 
+**Updates** (This PC tab) says whether a newer colibri is out, checked when the
+window opens (at most once a day) or on demand. In a git clone it lists the new
+commits of the branch you follow and **Update now** brings them in with `git pull
+--ff-only` (it never merges and never overwrites a file you edited: it refuses and
+says why), stops and restarts a running server, and rebuilds the engine from the new
+code (only what changed). A release folder is compared with the latest release, and
+**Open the download page** fetches the new one: unpack it over the folder with colibri
+stopped.
+
 **Set up for coding apps** (top of Connect apps) gives Claude Code and Codex the
 context they need: it shows the server's context and whether it is enough (65,536
 tokens at least), and on a press works out, with colibri's own planner for this

@@ -50,6 +50,7 @@ import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
 import setup_flow  # noqa: E402
 import setup_hw  # noqa: E402
+import updater  # noqa: E402
 import win_shortcuts  # noqa: E402
 
 GB = setup_catalog.GB
@@ -940,6 +941,18 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     b_sc_add.pack(side="left")
     b_sc_remove = ttk.Button(sc_row, text="Remove the shortcuts", command=lambda: shortcuts("remove"))
     b_sc_remove.pack(side="left", padx=6)
+    up_box = ttk.LabelFrame(t_pc, text="Updates", padding=8)
+    up_box.pack(fill="x", pady=(6, 0))
+    up_info = ttk.Label(up_box, text="", wraplength=900, justify="left")
+    up_info.pack(anchor="w")
+    up_row = ttk.Frame(up_box)
+    up_row.pack(anchor="w", pady=(6, 0))
+    ttk.Button(up_row, text="Check for updates", command=lambda: check_updates()).pack(side="left")
+    b_update = ttk.Button(up_row, text="Update now", state="disabled", command=lambda: update_now())
+    b_update.pack(side="left", padx=6)
+    b_download = ttk.Button(up_row, text="Open the download page", state="disabled",
+                            command=lambda: webbrowser.open(lib_state.get("updates", {}).get("url")
+                                                            or updater.RELEASES_PAGE))
 
     # Details
     t_cur = tab(" Details ")
@@ -1427,6 +1440,59 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                                           "(This PC tab: add or remove them later.)"):
             shortcuts("create")
 
+    # Updates: a newer colibri, and bringing this one up to date
+    def check_updates(quiet=False):
+        up_info.configure(text="Checking for updates...")
+        b_update.configure(state="disabled")
+
+        def work():
+            try:
+                events.put(("updates", (updater.check(), quiet)))
+            except Exception as error:  # a check never stops the window
+                events.put(("updates", ({"kind": "error", "words": f"Could not check: {error}",
+                                         "can_update": False}, quiet)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def show_updates(result, quiet):
+        lib_state["updates"] = result
+        lib_state["prefs"]["last_update_check"] = time.time()
+        save_prefs(lib_state["prefs"])
+        up_info.configure(text=f"colibri {result.get('version', '?')}. {result['words']}")
+        b_update.configure(state="normal" if result.get("can_update") and state["proc"] is None else "disabled")
+        b_update.pack_forget() if result.get("kind") == "release" else b_update.pack(side="left", padx=6)
+        b_download.configure(state="normal" if result.get("kind") == "release" else "disabled")
+        if result.get("can_update") or result.get("newer"):
+            v_status.set("A colibri update is available: This PC tab, Updates.")
+
+    def update_now():
+        result = lib_state.get("updates") or {}
+        if not result.get("can_update"):
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", "Update colibri now?\n\n" + result["words"] + "\n\nThe engine is rebuilt from the "
+                           "new code (only what changed)" + ("; the server stops and starts again." if running
+                                                              else ".")):
+            return
+
+        def done():
+            v_status.set("Updated. Close and open this window again to use its new version too.")
+            check_updates(quiet=True)
+
+        def rebuild():
+            then = (lambda: run_coli(["start", "--background", "--no-browser"], "start")) if running else done
+            if state["ready"]:
+                launch([py, COLI, "setup", "--yes", "--no-start"], {}, "setup", then=then)
+            else:
+                then()
+
+        pull = lambda: launch(updater.pull_command(result["root"]), {}, "update", then=rebuild)  # noqa: E731
+        if running:
+            launch([py, COLI, "stop"], {}, "stop", then=pull)
+        else:
+            pull()
+
     # Open app: one click from the top bar
     def fill_apps_menu():
         apps_menu.delete(0, "end")
@@ -1815,6 +1881,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                         refresh_apps()
                     elif not state.get("app_wait_cancel"):
                         v_status.set("The model did not load within an hour: see Details, Server log.")
+                elif kind == "updates":
+                    show_updates(*payload)
                 elif kind == "coding":
                     apply_coding(*payload)
                 elif kind == "shortcuts":
@@ -1924,6 +1992,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     detect()
     app_list.selection_set("claude")
     scan_models()
+    if time.time() - float(lib_state["prefs"].get("last_update_check") or 0) > 86400:
+        root.after(3000, lambda: check_updates(quiet=True))      # at most once a day, quietly
+    else:
+        up_info.configure(text=f"colibri {setup_flow.current_version()}. Check for updates to see what is new.")
     if sys.platform == "win32":
         shortcuts("status")
         root.after(1500, offer_shortcuts)

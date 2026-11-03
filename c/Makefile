@@ -3367,7 +3367,7 @@ install: colibri$(EXE) glm53$(EXE) inkling$(EXE) kimi_k3$(EXE) olmoe$(EXE) qwen3
 		openai_server.py cluster.py v4_dsml.py v41_dsml.py version.py \
 		image_engine.py term_image.py setup_flow.py setup_hw.py setup_catalog.py \
 		setup_download.py mcp_server.py documents.py configurator.py agent_connect.py \
-		model_library.py model_fetch.py win_shortcuts.py $(DESTDIR)$(LIBEXECDIR)/
+		model_library.py model_fetch.py win_shortcuts.py updater.py $(DESTDIR)$(LIBEXECDIR)/
 	$(INSTALL) -m 644 colibri.ico $(DESTDIR)$(LIBEXECDIR)/
 	$(INSTALL) -m 644 tools/*.py $(DESTDIR)$(LIBEXECDIR)/tools/
 	@# The dashboard is an optional build artifact (cd web && npm run build), so install
