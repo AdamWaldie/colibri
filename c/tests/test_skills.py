@@ -56,6 +56,13 @@ class Folders(unittest.TestCase):
         listed = skills.listing(self.dirs)["data"]
         self.assertNotIn("path", listed[0])
 
+    def test_a_bom_from_notepad(self):
+        Path(self.claude, "bom").mkdir()
+        Path(self.claude, "bom", "SKILL.md").write_bytes(b"\xef\xbb\xbf" + REVIEW.replace("code-review", "bommed").encode())
+        found = skills.discover([self.claude])
+        self.assertEqual(found["bommed"]["description"], "Review a diff for bugs, then style.")
+        self.assertNotIn("description:", skills.instructions(["bommed"], [self.claude]))
+
     def test_default_folders(self):
         dirs = skills.skill_dirs(env={"COLI_SKILLS_DIRS": os.pathsep.join(["/a", "", "/b"])}, home="/h")
         self.assertEqual(dirs, ["/a", "/b", os.path.join("/h", ".claude", "skills"),

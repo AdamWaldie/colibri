@@ -1454,7 +1454,7 @@ def server_status(cfg):
     except (OSError, ValueError, IndexError):
         pid = None
     alive = _pid_alive(pid)
-    shown = "127.0.0.1" if host in ("0.0.0.0", "") else host
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::", "") else host
     key = api_key(cfg)
     code, health = _get_json(f"http://{shown}:{port}/health", require_colibri=True, key=key)
     if code == 200 and isinstance(health, dict) and health.get("status") == "ok":

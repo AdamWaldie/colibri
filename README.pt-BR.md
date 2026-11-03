@@ -60,6 +60,28 @@ A placa de vídeo é opcional.
 2. Dê um duplo clique em **`START-HERE.bat`** na pasta descompactada. Se o Python
    não estiver instalado, ele oferece para instalar para você.
 
+**Ou com uma janela**: dê um duplo clique em **`CONFIGURE.bat`**. O console do colibri faz a mesma instalação com botões e, depois, inicia e conecta tudo:
+
+```mermaid
+flowchart TD
+    get["Get colibri<br/>release zip or git clone"] --> open["Double-click CONFIGURE.bat<br/>or the colibri shortcut"]
+    open --> ready{"Set up already?"}
+    ready -- "no" --> model["1 · Model<br/>pick from the catalog, or a folder you have"]
+    model --> where["2 · Location<br/>where the models are kept"]
+    where --> opts["3 · Options<br/>GPU, address, port, context"]
+    opts --> install["4 · Install<br/>engine + model download, resumable"]
+    install --> start
+    ready -- "yes" --> start["Start the server<br/>top bar: state and tokens/s"]
+    start --> chat["Open chat<br/>images, documents, skills"]
+    start --> apps["Connect apps<br/>Claude Code, Codex, opencode, aider, Hermes"]
+    start --> vscode["VS Code<br/>Continue, Roo Code, Cline: Write settings"]
+    start --> lan["Other computers<br/>address 0.0.0.0 + automatic API key"]
+    start -.-> mine["My models<br/>scan, move, get from Ollama or Hugging Face"]
+    start -.-> pc["This PC<br/>shortcut, updates, Tune speed"]
+```
+
+Na primeira vez, ele oferece um atalho do colibri no menu Iniciar e na área de trabalho: daí em diante o colibri abre por ali, sem linha de comando. Cada aba está descrita em [docs/windows.md](docs/windows.md#or-with-a-window-configurebat).
+
 **Linux** (Ubuntu e Debian; outras distribuições têm os mesmos pacotes com outros
 nomes)
 

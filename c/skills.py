@@ -63,7 +63,7 @@ def parse(text):
 
 
 def _read(path):
-    with open(path, encoding="utf-8", errors="replace") as handle:
+    with open(path, encoding="utf-8-sig", errors="replace") as handle:      # a BOM from Notepad
         return handle.read(MAX_SKILL_BYTES + 1)
 
 

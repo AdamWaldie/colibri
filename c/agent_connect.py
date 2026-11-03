@@ -302,7 +302,7 @@ def write_settings(tool_id, conn, home=None, continue_home=None):
                              "here to it by hand, or let Continue move it to config.yaml first")
         old = None
         if os.path.exists(path):
-            with open(path, encoding="utf-8") as handle:
+            with open(path, encoding="utf-8-sig") as handle:      # Notepad may add a BOM
                 old = handle.read()
         new = continue_merge(old, conn)
         os.makedirs(folder, exist_ok=True)
@@ -572,9 +572,14 @@ def launch_plan(tool_id, conn, home=None):
 
 def launcher_script(name, exe, args, folder, banner):
     """A .cmd that runs the app in `folder` and keeps the window open."""
-    quoted = " ".join(f'"{a}"' for a in args)
-    lines = ["@echo off", f"title colibri - {name}", f'cd /d "{folder}"',
-             "echo " + banner.replace("%", "%%"), f'call "{exe}" {quoted}'.rstrip()]
+    def pct(text):
+        return str(text).replace("%", "%%")       # a literal % in a .cmd is %%
+    quoted = " ".join(f'"{pct(a)}"' for a in args)
+    # chcp 65001: the file is UTF-8, and cmd.exe reads the lines after it as UTF-8, so a
+    # user or project folder named José or código arrives intact (not in the OEM page).
+    lines = ["@echo off", "chcp 65001 >nul", f"title colibri - {name}", f'cd /d "{pct(folder)}"',
+             "echo " + pct(banner).replace("&", "^&").replace("<", "^<").replace(">", "^>"),
+             f'call "{pct(exe)}" {quoted}'.rstrip()]
     return "\r\n".join(lines) + "\r\n"
 
 
@@ -597,7 +602,10 @@ def open_in_terminal(tool_id, conn, folder, exe, base_env=None):
         handle.write(launcher_script(entry["name"], exe, args, folder, banner))
     env = dict(os.environ if base_env is None else base_env)
     env.update(env_add)
-    subprocess.Popen(["cmd.exe", "/k", script], cwd=folder, env=env,
+    # `/k call "script"`: with a quote as the first character after /k, cmd.exe strips the
+    # outer quotes of a path holding ( ) & ^ @ (a profile named "Jane (Work)") and runs
+    # the wrong thing; after `call` they are kept.
+    subprocess.Popen(["cmd.exe", "/k", "call", script], cwd=folder, env=env,
                      creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
     return script
 

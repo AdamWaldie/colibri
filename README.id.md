@@ -60,6 +60,28 @@ internet. Kartu grafis bersifat opsional.
 2. Klik dua kali **`START-HERE.bat`** di folder hasil ekstraksi. Jika Python
    belum tersedia, skrip akan menawarkan untuk menginstalnya.
 
+**Atau dengan jendela**: klik dua kali **`CONFIGURE.bat`**. Konsol colibri melakukan penyiapan yang sama dengan tombol, lalu menjalankan dan menghubungkan semuanya:
+
+```mermaid
+flowchart TD
+    get["Get colibri<br/>release zip or git clone"] --> open["Double-click CONFIGURE.bat<br/>or the colibri shortcut"]
+    open --> ready{"Set up already?"}
+    ready -- "no" --> model["1 · Model<br/>pick from the catalog, or a folder you have"]
+    model --> where["2 · Location<br/>where the models are kept"]
+    where --> opts["3 · Options<br/>GPU, address, port, context"]
+    opts --> install["4 · Install<br/>engine + model download, resumable"]
+    install --> start
+    ready -- "yes" --> start["Start the server<br/>top bar: state and tokens/s"]
+    start --> chat["Open chat<br/>images, documents, skills"]
+    start --> apps["Connect apps<br/>Claude Code, Codex, opencode, aider, Hermes"]
+    start --> vscode["VS Code<br/>Continue, Roo Code, Cline: Write settings"]
+    start --> lan["Other computers<br/>address 0.0.0.0 + automatic API key"]
+    start -.-> mine["My models<br/>scan, move, get from Ollama or Hugging Face"]
+    start -.-> pc["This PC<br/>shortcut, updates, Tune speed"]
+```
+
+Pertama kali, konsol menawarkan pintasan colibri di menu Start dan desktop: setelah itu colibri dibuka dari sana, tanpa baris perintah. Setiap tab dijelaskan di [docs/windows.md](docs/windows.md#or-with-a-window-configurebat).
+
 **Linux** (Ubuntu dan Debian; distribusi lain memiliki paket yang sama dengan
 nama masing-masing)
 

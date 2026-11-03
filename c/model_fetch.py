@@ -332,6 +332,9 @@ def main(argv=None):
     ap.add_argument("--variant", default=None, help="the quantization (default: Q4_K_M or the nearest)")
     ap.add_argument("--info", action="store_true", help="only say what it is, as JSON; download nothing")
     a = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):          # a cp437/cp1252 terminal and a model name with ™
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     token = setup_download.hf_token() or ""
     cfg = setup_flow.load_config() or {}
     root = os.path.abspath(os.path.expanduser(a.root or cfg.get("models_root") or setup_flow.default_models_root()))
@@ -358,7 +361,8 @@ def main(argv=None):
         setup_flow.write_state("ready", model=plan["name"], model_dir=target)
         print(f"READY {target}", flush=True)
         return 0
-    except (FetchError, setup_download.DownloadError) as error:
+    except (FetchError, setup_download.DownloadError, OSError) as error:
+        # OSError: a full disk, or Windows holding the finished file (antivirus) at the rename
         setup_flow.write_state("error", message=str(error))
         print(f"\nstopped: {error}", file=sys.stderr, flush=True)
         return 1

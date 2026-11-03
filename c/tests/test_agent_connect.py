@@ -240,6 +240,22 @@ class VSCodeExtensions(unittest.TestCase):
                 agent_connect.write_settings("continue", conn(), continue_home=folder)
             self.assertFalse(Path(folder, "config.yaml").exists())
 
+    def test_continue_file_with_a_bom(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "config.yaml").write_bytes(b"\xef\xbb\xbf" + CONTINUE_USER.encode())
+            path, _, _ = agent_connect.write_settings("continue", conn(), continue_home=folder)
+            text = Path(path).read_text(encoding="utf-8")
+        self.assertEqual(text.count("models:"), 1)
+
+    def test_launcher_script_escapes_for_cmd(self):
+        text = agent_connect.launcher_script("X", r"C:\Users\Jane (Work)\a%b.cmd", ["-m", "50%"],
+                                             r"C:\p 100%", "colibri: X & <y>")
+        lines = text.split("\r\n")
+        self.assertEqual(lines[1], "chcp 65001 >nul")
+        self.assertIn('cd /d "C:\\p 100%%"', text)
+        self.assertIn('call "C:\\Users\\Jane (Work)\\a%%b.cmd" "-m" "50%%"', text)
+        self.assertIn("echo colibri: X ^& ^<y^>", text)
+
     def test_roo_settings_file(self):
         with tempfile.TemporaryDirectory() as folder:
             path, backup, _ = agent_connect.write_settings("roo", conn(), home=folder)
