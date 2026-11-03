@@ -42,6 +42,11 @@ on:
 permissions:
   contents: read
 
+# A newer push makes an older run of the same branch pointless.
+concurrency:
+  group: windows-console-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   console:
     name: Configurator on Windows
@@ -69,6 +74,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows-native tests failed" }
           if ($out -match "skipped") { throw "a Windows-native test was skipped on Windows" }
       - name: The console's modules, natively
+        if: success() || failure()      # every failure in one run, not just the first step's
         shell: pwsh
         working-directory: c
         run: |

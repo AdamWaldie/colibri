@@ -60,7 +60,8 @@ class Launcher(unittest.TestCase):
             with open(script, "w", encoding="utf-8", newline="") as handle:
                 handle.write(agent_connect.launcher_script("Fake", fake, args, project, "colibri: 50% & <ready>"))
             env = dict(os.environ, COLIBRI_API_KEY="k_1-2")
-            subprocess.run(["cmd.exe", "/c", script], check=True, env=env, capture_output=True, timeout=60)
+            done = subprocess.run(["cmd.exe", "/c", script], env=env, capture_output=True, timeout=60)
+            self.assertEqual(done.returncode, 0, (done.stdout + done.stderr).decode("utf-8", "replace"))
             lines = Path(out).read_text(encoding="utf-8", errors="replace").splitlines()
         self.assertEqual(os.path.normcase(lines[0].strip()), os.path.normcase(project))
         self.assertEqual([line.strip() for line in lines[1:]],
