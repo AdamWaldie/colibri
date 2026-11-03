@@ -204,6 +204,7 @@ TOOLS = (
      "launch": True, "bridge": True},
     {"id": "opencode", "name": "opencode", "exe": ("opencode",), "api": "OpenAI-compatible", "launch": True},
     {"id": "hermes", "name": "Hermes Agent", "exe": ("hermes",), "api": "OpenAI-compatible", "launch": True},
+    {"id": "aider", "name": "aider", "exe": ("aider",), "api": "OpenAI-compatible", "launch": True},
     {"id": "t3code", "name": "T3 Code", "exe": (), "api": "runs Codex or Claude Code", "launch": False,
      "bridge": True},
     {"id": "generic", "name": "Other apps (OpenAI API)", "exe": (), "api": "OpenAI-compatible",
@@ -274,6 +275,14 @@ def instructions(tool_id, conn):
             "Permanently: merge it into %USERPROFILE%\\.config\\opencode\\opencode.json (or "
             "opencode.json in a project):\n\n" + json.dumps(conf, indent=2) +
             f"\n\nthen: opencode -m colibri/{model}")
+    if tool_id == "aider":
+        env = {"OPENAI_API_BASE": v1, "OPENAI_API_KEY": key}
+        return head + (
+            "\n'Open in terminal' starts aider in the chosen folder with these variables (your "
+            "own aider settings are not changed):\n\n" + env_lines(env) +
+            f"\naider --model openai/{model} --no-show-model-warnings\n\n"
+            "Permanently: put the same in .aider.conf.yml (openai-api-base, openai-api-key, model) "
+            "in your home or project folder.")
     if tool_id == "hermes":
         return head + (
             "\n'Open in terminal' runs Hermes with HERMES_HOME set to a folder of colibri's own "
@@ -341,6 +350,9 @@ def launch_plan(tool_id, conn, home=None):
         # AGENTS.md stay available; colibri comes in as `-c` overrides for this run
         # (dotted keys, no quotes, so nothing for cmd.exe to mangle).
         return {"COLIBRI_API_KEY": conn["key"]}, codex_args(conn), {}
+    if tool_id == "aider":
+        return ({"OPENAI_API_BASE": conn["v1"], "OPENAI_API_KEY": conn["key"]},
+                ["--model", f"openai/{conn['model']}", "--no-show-model-warnings"], {})
     if tool_id == "hermes":
         folder = os.path.join(home, "hermes")
         return ({"HERMES_HOME": folder}, [], {os.path.join(folder, "config.yaml"): hermes_yaml(conn)})

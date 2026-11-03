@@ -138,6 +138,12 @@ class Launching(unittest.TestCase):
             for path in files:
                 self.assertTrue(path.startswith(home))     # never the user's ~/.codex or ~/.hermes
 
+    def test_aider_through_its_openai_settings(self):
+        env, args, files = agent_connect.launch_plan("aider", conn())
+        self.assertEqual(env, {"OPENAI_API_BASE": "http://127.0.0.1:8123/v1", "OPENAI_API_KEY": "local"})
+        self.assertEqual(args, ["--model", "openai/qwen3.6-colibri", "--no-show-model-warnings"])
+        self.assertEqual(files, {})
+
     def test_opencode_through_the_environment(self):
         env, args, files = agent_connect.launch_plan("opencode", conn())
         self.assertEqual(json.loads(env["OPENCODE_CONFIG_CONTENT"])["model"], "colibri/qwen3.6-colibri")
