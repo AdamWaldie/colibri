@@ -25,7 +25,7 @@ import {
   SlidersHorizontal,
   Timer,
   Trash2,
-  Zap, ImagePlus, Camera, Grid3x3, Palette, FileText} from "lucide-react"
+  Zap, ImagePlus, Camera, Grid3x3, Palette, FileText, Paperclip} from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -33,7 +33,7 @@ import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import {
   generateImage, generatesImages, getHealth, listModelInfo, streamChat,
-  type ChatMessage, type GeneratedImage, type HealthResponse, type StreamChatResult,
+  type AttachedDocument, type ChatMessage, type GeneratedImage, type HealthResponse, type StreamChatResult,
 } from "@/lib/api"
 import {
   DEFAULT_SIZE, DEFAULT_STEPS, chatTurns, clampSteps, dataUrlBlob, imageFileName, parseSeed, parseSize,
@@ -53,11 +53,15 @@ import { appendDelta, continuable, continuation, setFinish } from "@/lib/transcr
 import { cn } from "@/lib/utils"
 import { useLocale } from "./i18n"
 
-const message = (role: ChatMessage["role"], content: string, images?: string[]): ChatMessage => {
+const message = (role: ChatMessage["role"], content: string, images?: string[], documents?: AttachedDocument[]): ChatMessage => {
   let id: string
   try { id = crypto.randomUUID() } catch { id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16) }) }
-  return images?.length ? { id, role, content, images } : { id, role, content }
+  return { id, role, content, ...(images?.length ? { images } : {}), ...(documents?.length ? { documents } : {}) }
 }
+
+/* A document larger than this is refused in the browser, before it is read:
+   the server takes requests of up to 32 MB, and base64 adds a third. */
+const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 
 export default function App() {
   const { t, locale, setLocale, locales } = useLocale()
@@ -107,6 +111,7 @@ export default function App() {
   const fileRef = useRef<HTMLInputElement>(null)
   /* Pictures wait here until the turn is sent, then travel on the message. */
   const [pending, setPending] = useState<string[]>([])
+  const [pendingDocs, setPendingDocs] = useState<AttachedDocument[]>([])
   /* Size and steps are remembered like the endpoint; the seed is not, because
      a remembered seed would silently draw the same picture again. */
   const [imageSize, setImageSize] = useState<ImageSize>(() => parseSize(stored(localStorage, "colibri.imageSize", "")) || DEFAULT_SIZE)
@@ -259,13 +264,18 @@ export default function App() {
     setTimeout(() => connect(), 0)
   }
 
-  /* A picture becomes a data URI here and nowhere else: the API takes one
-     directly, so there is no upload endpoint, no temporary file and nothing to
-     clean up. Anything that is not an image is ignored rather than refused --
-     a dropped PDF should not interrupt what someone was typing. */
+  /* A picture or a document becomes a data URI here and nowhere else: the API
+     takes one directly, so there is no upload endpoint, no temporary file and
+     nothing to clean up. Pictures go to the model as pictures; any other file
+     (PDF, Word, Excel, PowerPoint, text, code...) as a document, whose text the
+     server reads (c/documents.py) so every model can use it. */
   const attach = async (files: FileList | File[] | null) => {
-    const pictures = Array.from(files || []).filter(file => file.type.startsWith("image/"))
-    if (!pictures.length) return
+    const all = Array.from(files || [])
+    const pictures = all.filter(file => file.type.startsWith("image/"))
+    const docs = all.filter(file => !file.type.startsWith("image/"))
+    if (docs.some(file => file.size > MAX_DOCUMENT_BYTES)) setError("status.fileTooLarge")
+    const fitting = docs.filter(file => file.size <= MAX_DOCUMENT_BYTES)
+    if (!pictures.length && !fitting.length) return
     const read = (file: File) => new Promise<string>((resolve, reject) => {
       const reader = new FileReader()
       reader.onload = () => resolve(String(reader.result))
@@ -274,13 +284,15 @@ export default function App() {
     })
     try {
       const urls = await Promise.all(pictures.map(read))
-      setPending(current => [...current, ...urls])
+      const readDocs = await Promise.all(fitting.map(async file => ({ name: file.name, url: await read(file) })))
+      if (urls.length) setPending(current => [...current, ...urls])
+      if (readDocs.length) setPendingDocs(current => [...current, ...readDocs])
     } catch { setError("status.serverError") }
   }
 
   const canSend = useMemo(() => imageMode
     ? Boolean(draft.trim() && model && !loading && seed !== undefined && validSide(imageSize.width) && validSide(imageSize.height))
-    : (draft.trim() || pending.length) && model && !loading, [draft, imageMode, imageSize, loading, model, pending, seed])
+    : (draft.trim() || pending.length || pendingDocs.length) && model && !loading, [draft, imageMode, imageSize, loading, model, pending, pendingDocs, seed])
 
   /* The shared streaming core. POSTs `payload` and appends every delta into the
      message `targetId`, with the same live metrics and abort/error wiring whether
@@ -364,15 +376,16 @@ export default function App() {
   }
 
   /* consumeDraft is false for regenerate so a follow-up already in the composer is not eaten. */
-  const send = async (text = draft, previous = messages, pictures = pending, consumeDraft = true) => {
+  const send = async (text = draft, previous = messages, pictures = pending, consumeDraft = true, docs = pendingDocs) => {
     const content = text.trim()
-    if ((!content && !pictures.length) || loading) return
-    const user = message("user", content, pictures)
+    if ((!content && !pictures.length && !docs.length) || loading) return
+    const user = message("user", content, pictures, docs)
     const assistant = message("assistant", "")
     const history = [...previous, user]
     if (consumeDraft) {
       setDraft("")
       setPending([])
+      setPendingDocs([])
     }
     updateMessages([...history, assistant])
     await runStream(history, assistant.id)
@@ -614,13 +627,15 @@ export default function App() {
             {item.role !== "user" && <div className="assistant-brand"><Brand /><span>colibrì</span></div>}
             {item.images?.length ? <div className="message-images">{item.images.map((url, at) =>
               <img key={at} src={url} alt={t("ui.attachedImage", { n: at + 1 })} />)}</div> : null}
+            {item.documents?.length ? <div className="message-documents">{item.documents.map((doc, at) =>
+              <span key={at} className="document-chip" title={doc.name}><FileText />{doc.name}</span>)}</div> : null}
             {item.role === "assistant" && item.generated ? imageCard(item) : <div className="message-body">{item.reasoning
               ? <details className="reasoning" open={!item.content}>
                   <summary>{t("sidebar.reasoning")}</summary>
                   <div className="reasoning-body">{item.reasoning}</div>
                 </details>
               : null}{item.content ? (item.role === "assistant" ? <Markdown text={item.content} /> : item.content) : <span className="typing" aria-label={t("ui.generating")}><i /><i /><i /></span>}</div>}
-            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}</div>}
+            {item.role === "assistant" && item.content && <div className="message-actions"><button className="icon-action" aria-label={t("ui.copy")} title={t("ui.copy")} onClick={() => void copyMessage(item)}><Copy /></button>{copied === item.id && <span role="status">{t("ui.copied")}</span>}{index === messages.length - 1 && !loading && !imageMode && <button className="icon-action" aria-label={t("ui.regenerate")} title={t("ui.regenerate")} onClick={() => { const retry = resendFrom(messages, index); if (retry) void send(retry.text, retry.previous, retry.pictures, false, retry.documents) }}><RefreshCw /></button>}{index === messages.length - 1 && !loading && !imageMode && supportsContinuation(health) && continuable(item) && <button className="icon-action" aria-label={t("ui.continue")} title={t("ui.continue")} onClick={() => void continueTurn()}><StepForward /></button>}</div>}
           </article>)}</div>
         </div>}
         <div className="composer-wrap">
@@ -629,7 +644,12 @@ export default function App() {
           <form className={cn("composer", imageMode && "image-mode")} onSubmit={e => { e.preventDefault(); submit() }}
             onDragOver={e => { if (!imageMode && e.dataTransfer.types.includes("Files")) e.preventDefault() }}
             onDrop={e => { if (!imageMode && e.dataTransfer.files.length) { e.preventDefault(); void attach(e.dataTransfer.files) } }}>
-            {!imageMode && pending.length > 0 && <div className="composer-attachments">
+            {!imageMode && (pending.length > 0 || pendingDocs.length > 0) && <div className="composer-attachments">
+              {pendingDocs.map((doc, at) => <span key={`doc-${at}`} className="attachment document-chip" title={doc.name}>
+                <FileText />{doc.name}
+                <button type="button" aria-label={t("ui.removeFile")} title={t("ui.removeFile")}
+                  onClick={() => setPendingDocs(list => list.filter((_, index) => index !== at))}><X /></button>
+              </span>)}
               {pending.map((url, at) => <span key={at} className="attachment">
                 <img src={url} alt={t("ui.attachedImage", { n: at + 1 })} />
                 <button type="button" aria-label={t("ui.removeImage")} title={t("ui.removeImage")}
@@ -640,10 +660,10 @@ export default function App() {
             <div className="composer-foot">
               {imageMode ? <ImageControls size={imageSize} custom={customSize} steps={imageSteps} seed={seedText} seedValid={seed !== undefined}
                 onSize={setImageSize} onCustom={setCustomSize} onSteps={setImageSteps} onSeed={setSeedText} /> : <>
-              <input ref={fileRef} type="file" accept="image/*" multiple hidden
+              <input ref={fileRef} type="file" multiple hidden
                 onChange={e => { void attach(e.target.files); e.target.value = "" }} />
-              <button type="button" className="attach-chip" aria-label={t("ui.attachImage")} title={t("ui.attachImage")}
-                onClick={() => fileRef.current?.click()}><ImagePlus /></button>
+              <button type="button" className="attach-chip" aria-label={t("ui.attachFile")} title={t("ui.attachFile")}
+                onClick={() => fileRef.current?.click()}><Paperclip /></button>
               <button type="button" className="reasoning-chip" aria-pressed={thinking} onClick={() => setThinking(value => !value)}><BrainCircuit />{t("sidebar.reasoning")}</button>
               <button type="button" className="slot-chip" onClick={() => openSettings("model")}><Database />{t("topbar.slot", { n: cacheSlot + 1 })}</button>
               </>}

@@ -1,9 +1,10 @@
-import type { ChatMessage } from "./api"
+import type { AttachedDocument, ChatMessage } from "./api"
 
 export interface ResendTurn {
   text: string
   previous: ChatMessage[]
   pictures: string[]
+  documents: AttachedDocument[]
 }
 
 /* Rebuild the last user turn so regenerate can send it again. The pictures
@@ -20,6 +21,7 @@ export function resendFrom(messages: ChatMessage[], assistantIndex: number): Res
     text: user.content,
     previous: messages.slice(0, userIndex),
     pictures: user.images ? [...user.images] : [],
+    documents: user.documents ? [...user.documents] : [],
   }
 }
 

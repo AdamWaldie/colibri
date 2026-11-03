@@ -27,6 +27,8 @@ const en: Record<string, string> = {
   "ui.generating": "Generating",
   "ui.copy": "Copy response",
   "ui.attachImage": "Attach an image",
+  "ui.attachFile": "Attach images or documents (PDF, Word, Excel, PowerPoint, text, code...)",
+  "ui.removeFile": "Remove document",
   "ui.removeImage": "Remove image",
   "ui.attachedImage": "Attached image {{n}}",
   "ui.copied": "Copied",
@@ -133,6 +135,7 @@ const en: Record<string, string> = {
   "status.notConnected": "Not connected",
   "status.runtimeUnavailable": "Runtime metrics unavailable",
   "status.serverError": "Could not reach the server.",
+  "status.fileTooLarge": "A document larger than 20 MB was left out: split it, or save its text as a smaller file.",
   "status.generationFailed": "Generation failed.",
 
   // sidebar — runtime

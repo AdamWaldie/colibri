@@ -13,6 +13,14 @@ const user = (content: string, images?: string[]): ChatMessage =>
 const assistant = (content: string): ChatMessage => ({ id: "a", role: "assistant", content })
 
 describe("resendFrom", () => {
+  it("keeps the documents that arrived with the last user turn", () => {
+    const report = { name: "report.pdf", url: "data:application/pdf;base64,JVBERi0=" }
+    const turn = { ...user("summarise this"), documents: [report] }
+    const retry = resendFrom([turn, assistant("skipped")], 1)
+    expect(retry?.documents).toEqual([report])
+    expect(retry?.documents).not.toBe(turn.documents)
+  })
+
   it("keeps the pictures that arrived with the last user turn", () => {
     const photo = "data:image/png;base64,aaa"
     const messages = [user("what is this?", [photo]), assistant("a cat")]
@@ -20,6 +28,7 @@ describe("resendFrom", () => {
       text: "what is this?",
       previous: [],
       pictures: [photo],
+      documents: [],
     })
   })
 
@@ -43,6 +52,7 @@ describe("resendFrom", () => {
       text: "and this?",
       previous: [first, reply],
       pictures: [photo],
+      documents: [],
     })
   })
 
@@ -55,6 +65,7 @@ describe("resendFrom", () => {
       text: "hello",
       previous: [],
       pictures: [],
+      documents: [],
     })
   })
 })
@@ -84,6 +95,32 @@ describe("regenerate request body", () => {
     expect(body.messages[0].content).toEqual([
       { type: "text", text: "describe this" },
       { type: "image_url", image_url: { url: photo } },
+    ])
+  })
+
+  it("puts documents on the wire as OpenAI file parts, before the text", async () => {
+    const report = { name: "report.pdf", url: "data:application/pdf;base64,JVBERi0=" }
+    const fetchMock = vi.fn().mockResolvedValue(new Response("data: [DONE]\n\n", {
+      headers: { "content-type": "text/event-stream" },
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+    await streamChat({
+      baseUrl: "http://localhost:8000/v1",
+      apiKey: "",
+      model: "test-model",
+      messages: [{ id: "u", role: "user", content: "summarise", documents: [report] }],
+      temperature: 0,
+      maxTokens: 8,
+      enableThinking: false,
+      signal: new AbortController().signal,
+      onDelta: () => undefined,
+    })
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body as string) as {
+      messages: Array<{ content: unknown }>
+    }
+    expect(body.messages[0].content).toEqual([
+      { type: "file", file: { filename: "report.pdf", file_data: report.url } },
+      { type: "text", text: "summarise" },
     ])
   })
 

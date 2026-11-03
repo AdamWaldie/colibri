@@ -73,6 +73,9 @@ button{color:inherit}button:disabled{cursor:default;opacity:.4}svg.lucide{stroke
 .attach-chip{display:inline-flex;align-items:center;justify-content:center;width:2rem;height:2rem;border-radius:.6rem;color:inherit;opacity:.75}
 .attach-chip:hover{opacity:1;background:color-mix(in srgb,var(--foreground) 10%,transparent)}
 .attach-chip svg{width:1.05rem;height:1.05rem}
+.document-chip{display:inline-flex;align-items:center;gap:.35rem;max-width:16rem;padding:.35rem .6rem;border-radius:.5rem;border:1px solid color-mix(in srgb,var(--foreground) 16%,transparent);background:color-mix(in srgb,var(--foreground) 4%,transparent);font-size:.8rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.document-chip svg{width:.95rem;height:.95rem;flex:none}
+.message-documents{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 .5rem}
 .message-images{display:flex;flex-wrap:wrap;gap:.5rem;margin:0 0 .5rem}
 .message-images img{max-width:min(320px,100%);border-radius:.6rem;border:1px solid color-mix(in srgb,var(--foreground) 14%,transparent)}
 

@@ -41,6 +41,11 @@ def _user_content(content):
             if u:
                 parts.append({"type": "image_url", "image_url": {"url": u}})
                 img = True
+        elif t == "input_file":
+            # the gateway turns a file part into its text (c/documents.py)
+            parts.append({"type": "file", "file": {"filename": p.get("filename") or "document",
+                                                   "file_data": p.get("file_data"), "file_id": p.get("file_id")}})
+            img = True
     return parts if img else "".join(x["text"] for x in parts)
 
 
