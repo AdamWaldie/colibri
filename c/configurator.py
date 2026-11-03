@@ -31,6 +31,7 @@ flashes on screen.
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -302,6 +303,18 @@ def plan_lines(options, row=None, free=None):
     return lines, warnings
 
 
+def live_words(live):
+    """The answers being written right now, for the status strip: the newest one's
+    rate over its last tokens (what it does now), else that it is reading the prompt."""
+    turn = live[-1]
+    more = f" (+{len(live) - 1} more)" if len(live) > 1 else ""
+    if turn.get("state") == "writing":
+        rate = turn.get("tok_s_now") or turn.get("tok_s") or 0
+        return f"(writing: {rate:.1f} tok/s, {turn.get('tokens', 0)} tokens{more})"
+    return (f"(reading a {turn.get('prompt_tokens', 0)}-token prompt: "
+            f"{turn.get('elapsed_s', 0):.0f}s{more})")
+
+
 def server_words(server, cfg):
     """The status strip: (colour, text) for the server state."""
     if not cfg:
@@ -311,11 +324,56 @@ def server_words(server, cfg):
         return "orange", f"{name}: setup not finished. Install continues where it stopped"
     state = (server or {}).get("state")
     if state == "ready":
+        live = server.get("live") or []
+        if live:
+            return "green", f"Running: {name}  " + live_words(live)
         speed = server.get("tokens_per_second")
         return "green", f"Running: {name}" + (f"  ({speed} tok/s last answer)" if speed else "")
     if state == "loading":
         return "orange", f"Loading {name}... (large models take minutes)"
     return "grey", f"Stopped: {name} is set up. Press Start"
+
+
+TUNE_KEEP = ("--model", "--gpu", "--ctx", "--ram", "--vram", "--policy")
+
+
+def tune_command(cfg, python, coli=None):
+    """`coli tune` for the model and the resources `coli start` runs it with, so the
+    profile it saves is the one the next start loads (the run's --auto-tier applies
+    it). (command, environment additions)."""
+    args, keep, i = list(cfg.get("args") or []), [], 0
+    while i < len(args):
+        if args[i] in TUNE_KEEP and i + 1 < len(args):
+            keep += args[i:i + 2]
+            i += 2
+            continue
+        i += 1
+    if "--model" not in keep:
+        keep = ["--model", cfg.get("model_dir") or ""] + keep
+    return [python, coli or COLI, "tune"] + keep, dict(cfg.get("env") or {})
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+TUNE_ACCEPTED_RE = re.compile(r"accepted\s+(.+?):\s+([0-9.]+)\s*\S+\s*([0-9.]+)\s*tok/s\s*\(\+([0-9.]+)%\)")
+
+
+def tune_result(output, code):
+    """(words for the window, faster) from `coli tune`'s output and exit code."""
+    text = ANSI_RE.sub("", output or "")
+    found = TUNE_ACCEPTED_RE.search(text)
+    if code == 0 and found:
+        name, before, after, gain = found.groups()
+        return (f"Tuned: {before} -> {after} tok/s (+{gain}%), with {name}. Every start "
+                "uses it from now on."), True
+    if code == 0 and "baseline retained" in text:
+        return ("Measured: this PC already runs the model at its fastest safe settings, so "
+                "nothing changed."), False
+    if code == 0:
+        return "Tuning finished: the output (Show output) has the numbers.", False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    reason = next((line for line in reversed(lines) if "failed" in line or "cannot" in line),
+                  lines[-1] if lines else "")
+    return f"Tuning stopped: {reason or 'see Show output'}. Nothing was changed.", False
 
 
 CODING_STEPS = (131072, 65536)      # what Claude Code and Codex want, then what they need
@@ -959,6 +1017,21 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                             command=lambda: webbrowser.open(lib_state.get("updates", {}).get("url")
                                                             or updater.RELEASES_PAGE))
 
+    sp_box = ttk.LabelFrame(t_pc, text="Speed", padding=8)
+    sp_box.pack(fill="x", pady=(6, 0))
+    sp_info = ttk.Label(sp_box, wraplength=900, justify="left",
+                        text="Tune speed measures this model on this PC with a few safe settings "
+                             "(how the expert cache and threads are used; never anything that "
+                             "changes the answers) and keeps the fastest. It takes a few minutes, and "
+                             "the server is stopped meanwhile.")
+    sp_info.pack(anchor="w")
+    if (lib_state["prefs"].get("last_tune") or {}).get("words"):
+        sp_info.configure(text=sp_info.cget("text") + "\nLast time: " + lib_state["prefs"]["last_tune"]["words"])
+    sp_row = ttk.Frame(sp_box)
+    sp_row.pack(anchor="w", pady=(6, 0))
+    b_tune = ttk.Button(sp_row, text="Tune speed", command=lambda: tune_speed())
+    b_tune.pack(side="left")
+
     # Details
     t_cur = tab(" Details ")
     cur = ttk.Treeview(t_cur, columns=("value",), show="tree", height=14)
@@ -1243,7 +1316,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set({"setup": "Installing...", "start": "Starting the server...",
                       "stop": "Stopping the server...", "import": "Importing the GGUF...",
                       "use": "Switching to the model...",
-                      "fetch": "Getting the model..."}.get(kind, "Working..."))
+                      "fetch": "Getting the model...",
+                      "tune": "Tuning the speed (a few minutes)..."}.get(kind, "Working..."))
         if kind == "show":
             show_output()
 
@@ -1517,6 +1591,43 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
             launch([py, COLI, "stop"], {}, "stop", then=pull)
         else:
             pull()
+
+    # Speed: `coli tune` on the installed model, the server stopped meanwhile
+    def tune_speed():
+        cfg = state["cfg"] or {}
+        if not cfg.get("model_dir") or not state["ready"]:
+            messagebox.showinfo("colibri", "Set up a model first: steps 1 to 4, or My models.")
+            return
+        running = (state["server"] or {}).get("state") in ("ready", "loading")
+        if not messagebox.askyesno(
+                "colibri", "Tune colibri's speed for this model on this PC?\n\nIt runs the model a "
+                           "few times with different safe settings and keeps the fastest: a few "
+                           "minutes, with the PC busy." + ("\n\nThe server stops meanwhile and starts "
+                                                          "again afterwards." if running else "")):
+            return
+        cmd, extra = tune_command(cfg, py)
+        state["tune"] = {"out": [], "restart": running}
+
+        def tune():
+            sp_info.configure(text="Tuning... (Show output has the progress)")
+            launch(cmd, extra, "tune")
+
+        if running:
+            launch([py, COLI, "stop"], {}, "stop", then=tune)
+        else:
+            tune()
+
+    def tune_done(code, cancelled):
+        job = state.pop("tune", None) or {}
+        words, faster = tune_result("".join(job.get("out", [])), code)
+        if cancelled:
+            words = "Tuning cancelled. Nothing was changed."
+        sp_info.configure(text=words)
+        lib_state["prefs"]["last_tune"] = {"words": words, "when": time.time()}
+        save_prefs(lib_state["prefs"])
+        v_status.set(words)
+        if job.get("restart"):
+            root.after(100, lambda: run_coli(["start", "--background", "--no-browser"], "start"))
 
     # Open app: one click from the top bar
     def fill_apps_menu():
@@ -1867,6 +1978,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                 kind, payload = events.get_nowait()
                 if kind == "out":
                     log_write(payload)
+                    if state.get("proc_kind") == "tune" and state.get("tune"):
+                        state["tune"]["out"].append(payload)
                 elif kind == "done":
                     what, code = payload
                     state["proc"] = None
@@ -1889,6 +2002,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     refresh_apps()
                     if what in ("import", "use", "setup", "stop", "fetch"):
                         scan_models()
+                    if what == "tune":
+                        tune_done(code, was_cancelled)
                     if then and code == 0 and not was_cancelled:
                         then()
                 elif kind == "app_wait":

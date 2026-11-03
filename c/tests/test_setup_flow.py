@@ -716,6 +716,18 @@ class RunConfiguration(HomeTestCase):
         self.assertIsNone(setup_flow.load_config())
         self.assertEqual(setup_flow.configured_port(), 8000)
 
+    def test_status_carries_the_answers_in_progress(self):
+        live = [{"state": "writing", "tok_s": 6.0, "tok_s_now": 7.0, "tokens": 40}]
+        replies = {"/health": {"status": "ok", "live": live + ["junk"]}, "/profile": {"turns": []},
+                   "/v1/models": {"data": [{"id": "q"}]}}
+
+        def get(url, timeout=2.0, require_colibri=False):
+            return 200, replies[url.split(":8123", 1)[1]]
+
+        with mock.patch.object(setup_flow, "_get_json", get):
+            status = setup_flow.server_status({"port": 8123, "host": "127.0.0.1"})
+        self.assertEqual((status["state"], status["live"], status["model_id"]), ("ready", live, "q"))
+
     def test_last_turn_speed(self):
         self.assertEqual(setup_flow.last_turn_speed({"turns": [{"wall_s": 4.0, "completion_tokens": 10}]}),
                          2.5)

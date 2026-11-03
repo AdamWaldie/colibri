@@ -1447,6 +1447,8 @@ def server_status(cfg):
             out["tokens_per_second"] = last_turn_speed(profile)
         if health and health.get("arch"):
             out["arch"] = health["arch"]
+        live = health.get("live") if health else None
+        out["live"] = [turn for turn in live if isinstance(turn, dict)] if isinstance(live, list) else []
         _, models = _get_json(f"http://{shown}:{port}/v1/models")
         data = (models or {}).get("data") or []
         if data and isinstance(data[0], dict):

@@ -217,6 +217,17 @@ class Usability(unittest.TestCase):
         self.assertIn("Press Start", configurator.server_words({"state": "stopped"}, cfg)[1])
         self.assertIn("not finished", configurator.server_words(None, {"status": "pending"})[1])
 
+    def test_live_speed_in_the_status_strip(self):
+        cfg = {"status": "ready", "model": {"name": "Q"}}
+        writing = {"state": "writing", "tok_s": 6.2, "tok_s_now": 7.48, "tokens": 120, "prompt_tokens": 900}
+        reading = {"state": "reading", "elapsed_s": 41.6, "prompt_tokens": 18000, "tokens": 0}
+        words = configurator.server_words({"state": "ready", "live": [writing], "tokens_per_second": 5}, cfg)[1]
+        self.assertEqual(words, "Running: Q  (writing: 7.5 tok/s, 120 tokens)")
+        self.assertIn("reading a 18000-token prompt: 42s (+1 more)",
+                      configurator.server_words({"state": "ready", "live": [writing, reading]}, cfg)[1])
+        self.assertIn("5 tok/s last answer",
+                      configurator.server_words({"state": "ready", "live": [], "tokens_per_second": 5}, cfg)[1])
+
     def test_why_an_app_cannot_be_opened(self):
         import agent_connect
         claude = agent_connect.tool("claude")
@@ -320,6 +331,34 @@ class CodingContext(unittest.TestCase):
         self.assertIn("too small", configurator.coding_advice(32768))
         self.assertIn("enough", configurator.coding_advice(65536))
         self.assertIn("ready", configurator.coding_advice(131072))
+
+
+
+class SpeedTuning(unittest.TestCase):
+    CFG = {"model_dir": "D:/models/qwen", "launcher": "C:/colibri/coli", "env": {"COLI_VULKAN": "1"},
+           "args": ["web", "--model", "D:/models/qwen", "--host", "127.0.0.1", "--port", "8000",
+                    "--gpu", "auto", "--auto-tier", "--ctx", "65536"]}
+
+    def test_tune_command_runs_what_start_runs(self):
+        cmd, extra = configurator.tune_command(self.CFG, "py.exe", coli="C:/colibri/coli")
+        self.assertEqual(cmd, ["py.exe", "C:/colibri/coli", "tune", "--model", "D:/models/qwen",
+                               "--gpu", "auto", "--ctx", "65536"])
+        self.assertEqual(extra, {"COLI_VULKAN": "1"})
+        cmd, _ = configurator.tune_command({"model_dir": "M", "args": []}, "py", coli="coli")
+        self.assertEqual(cmd[3:], ["--model", "M"])
+
+    def test_tune_result(self):
+        accepted = ("\x1b[2m  · measuring\x1b[0m\n  \x1b[38;5;78m✓ accepted\x1b[0m cap-24: 4.10 → 5.02 tok/s "
+                    "(+22.4%)\n  profile: x.json\n")
+        words, faster = configurator.tune_result(accepted, 0)
+        self.assertTrue(faster)
+        self.assertIn("4.10 -> 5.02 tok/s (+22.4%), with cap-24", words)
+        words, faster = configurator.tune_result("  ✓ baseline retained: no candidate cleared", 0)
+        self.assertFalse(faster)
+        self.assertIn("already runs the model at its fastest", words)
+        words, _ = configurator.tune_result("banner\ntuning failed: engine exited 3\n", 1)
+        self.assertEqual(words, "Tuning stopped: tuning failed: engine exited 3. Nothing was changed.")
+        self.assertIn("Show output", configurator.tune_result("", 0)[0])
 
 
 if __name__ == "__main__":

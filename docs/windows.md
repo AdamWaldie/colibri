@@ -80,6 +80,19 @@ code (only what changed). A release folder is compared with the latest release, 
 **Open the download page** fetches the new one: unpack it over the folder with colibri
 stopped.
 
+**Speed** (This PC tab) has **Tune speed**, which runs `coli tune` on the installed
+model with the same model, GPU and context settings `coli start` uses.
+- It tries only settings that don't change the answers (how the expert cache and
+  threads are used), and keeps the fastest if it beats the current one by at least 3%.
+- The result is saved as a profile, and every later start uses it.
+- It takes a few minutes. A running server is stopped first and started again
+  afterwards.
+- The window shows the before and after speed, or that nothing was faster.
+
+While the server runs, the top bar shows the answer being written right now: its
+speed over the last tokens, or how long the prompt has been read so far. Once the
+answer is done, the bar shows the last answer's speed instead.
+
 **Set up for coding apps** (top of Connect apps) gives Claude Code and Codex the
 context they need: it shows the server's context and whether it is enough (65,536
 tokens at least), and on a press works out, with colibri's own planner for this
