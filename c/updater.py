@@ -49,6 +49,7 @@ def checkout_root(here=HERE):
 def git(root, *args, timeout=120):
     """(return code, stdout, stderr) of a git command in `root`, without a window."""
     done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True, timeout=timeout,
+                          encoding="utf-8", errors="replace",                  # git writes UTF-8
                           stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
                           env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
     return done.returncode, done.stdout.strip(), done.stderr.strip()

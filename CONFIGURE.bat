@@ -31,6 +31,11 @@ rem The window needs Tk, which the python.org installer includes ("tcl/tk and ID
 "%COLI_PY_EXE%" %COLI_PY_ARG% -c "import tkinter" >nul 2>&1
 if errorlevel 1 goto :no_tk
 
+rem pythonw.exe shows nothing when the window cannot even load (a missing or broken
+rem file): load it here first, where an error is printed and this window waits.
+"%COLI_PY_EXE%" %COLI_PY_ARG% -c "import os, sys; sys.path.insert(0, os.path.dirname(os.environ['COLI_CONF'])); import configurator"
+if errorlevel 1 goto :hold_fail
+
 rem pythonw.exe runs the window without keeping this console open: pyw for the
 rem py launcher, pythonw next to python.exe otherwise.
 set "COLI_PYW="

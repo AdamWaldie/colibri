@@ -71,8 +71,12 @@ def create_script(paths, program, arguments, workdir, icon=None, description=DES
 
 def powershell(script, timeout=60):
     """Run a PowerShell script without a window; its standard output."""
+    # PowerShell writes a pipe in the OEM code page; a desktop under "C:\Users\José" or
+    # "Área de Trabalho" would come back garbled. Ask it for UTF-8 and read UTF-8.
+    script = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false\n" + script
     done = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                            "-Command", script], capture_output=True, text=True, timeout=timeout,
+                          encoding="utf-8", errors="replace",
                           creationflags=NO_WINDOW, stdin=subprocess.DEVNULL)
     if done.returncode:
         raise OSError((done.stderr or done.stdout or "PowerShell failed").strip().splitlines()[-1])
