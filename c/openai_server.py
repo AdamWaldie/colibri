@@ -4993,7 +4993,12 @@ def anthropic_to_openai(body):
     if extra_system:
         raw = [m for m in raw if not (isinstance(m, dict) and m.get("role") == "system")]
         if not raw:
-            raise APIError(400, "`messages` needs a user message besides the system ones.", "messages")
+            # Only system turns: refused in the words Claude Code's fallback matches (it
+            # retries without its mid-conversation system turn on "role 'system' ... not
+            # supported"), as before system turns among the others were accepted.
+            raise APIError(400, "Input message role 'system' is not supported on its own: "
+                           "`messages` needs a user message besides the system ones.",
+                           "messages.0.role", "unsupported_role")
         if messages and messages[0]["role"] == "system":
             messages[0]["content"] = "\n\n".join([messages[0]["content"]] + extra_system)
         else:

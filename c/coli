@@ -4235,6 +4235,8 @@ def main():
     plogs.add_argument("-n","--lines",type=int,default=100)
     plogs.add_argument("--install",action="store_true",help="the install log instead of the server's")
     sub.add_parser("mcp",help="Model Context Protocol server on stdio, for AI coding assistants")
+    sub.add_parser("configure",help="the setup window: model, location, install, coding apps "
+                   "(on Windows also CONFIGURE.bat and the colibri shortcut)")
     pb=sub.add_parser("bench", parents=[common]); pb.add_argument("tasks", nargs="*")
     pb.add_argument("--limit",type=int,default=40)
     if sys.platform == "win32":
@@ -4280,6 +4282,9 @@ def main():
     if a.cmd=="mcp":
         import mcp_server
         sys.exit(mcp_server.main())
+    if a.cmd=="configure":
+        import configurator
+        sys.exit(configurator.main())
     if a.cmd=="cluster":
         if a.cluster_cmd=="coordinator": handler=cmd_cluster_coordinator
         elif a.cluster_cmd=="worker": handler=cmd_cluster_worker

@@ -18,6 +18,12 @@ directly. The same from a terminal: `py -3 c\coli setup`. See
 
 ### Or with a window: CONFIGURE.bat
 
+The first time the window opens it offers a **colibri shortcut** in the Start menu
+and on the desktop, with the colibri icon: from then on colibri opens from there,
+with no console and no command line (This PC tab: add or remove it again; add it
+again after moving the colibri folder). `coli configure` opens the same window, and
+release archives carry it too (`CONFIGURE.bat` next to `coli.cmd`).
+
 Double-click **`CONFIGURE.bat`** (or run `py -3 c\configurator.py`) for the same
 setup in a window. A strip at the top always shows whether colibri is running
 and which model, with **Open chat**, **Start** and **Stop**. Then four steps:
