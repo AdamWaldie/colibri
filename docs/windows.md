@@ -36,6 +36,20 @@ and which model, with **Open chat**, **Start** and **Stop**. Then four steps:
    time left. Cancel, or close the window, at any point: Install again continues
    where it stopped.
 
+**My models** lists the models already on this PC, wherever they are:
+colibri's own folders on every drive, Ollama's models (its store, or
+`OLLAMA_MODELS`), LM Studio's, the Hugging Face cache, and any folder you add.
+Each says whether colibri runs it. A GGUF from Ollama or elsewhere runs after
+**Import** (`coli import`, which reads the file where it is, no copy) when its
+architecture is one colibri's engines serve: the Qwen3 / Qwen3-Coder MoE,
+Qwen3.5 / 3.6, GLM, DeepSeek V4, MiMo, Inkling, Kimi K3 and OLMoE families. Most
+Ollama models (Llama, Gemma, Mistral, Phi) are other architectures and are listed
+as not runnable. **Use this model** switches the setup to it (stopping the running
+server first). **Move to another drive** renames the folder on the same drive, or
+copies it to another one with progress, checks every file's size and only then
+removes the original; Cancel leaves it where it was, and the setup follows a
+moved model.
+
 **Connect apps** uses the running model from a coding app, the way a local
 Ollama is used. The model id and context come from the server's `/v1/models`.
 Claude Code (through `/v1/messages`), Codex, opencode and Hermes Agent open in a

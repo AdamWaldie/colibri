@@ -237,5 +237,21 @@ class Usability(unittest.TestCase):
         self.assertEqual(configurator.kill_tree_command(42), ["taskkill", "/PID", "42", "/T", "/F"])
 
 
+class LibraryHelpers(unittest.TestCase):
+    def test_library_words(self):
+        self.assertEqual(configurator.library_words("import"), "After Import")
+        self.assertEqual(configurator.library_words("yes"), "Ready")
+
+    def test_prefs_round_trip_and_missing_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "sub", "configurator.json")
+            self.assertEqual(configurator.load_prefs(path), {})
+            configurator.save_prefs({"scan_folders": ["D:/models"]}, path)
+            self.assertEqual(configurator.load_prefs(path), {"scan_folders": ["D:/models"]})
+            with open(path, "w") as handle:
+                handle.write("not json")
+            self.assertEqual(configurator.load_prefs(path), {})
+
+
 if __name__ == "__main__":
     unittest.main()

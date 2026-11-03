@@ -44,6 +44,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import agent_connect  # noqa: E402
+import model_library  # noqa: E402
 import setup_catalog  # noqa: E402
 import setup_download  # noqa: E402
 import setup_flow  # noqa: E402
@@ -359,6 +360,38 @@ def config_summary(cfg):
     return lines
 
 
+LIBRARY_WORDS = {"yes": "Ready", "incomplete": "Download not finished", "import": "After Import",
+                 "no": "No"}
+
+
+def library_words(runs):
+    return LIBRARY_WORDS.get(runs, runs)
+
+
+def prefs_path():
+    return os.path.join(setup_flow.setup_home(), "configurator.json")
+
+
+def load_prefs(path=None):
+    """The window's own small memory: the extra folders "My models" scans."""
+    try:
+        with open(path or prefs_path(), encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_prefs(prefs, path=None):
+    path = path or prefs_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(prefs, handle, indent=2)
+    except OSError:
+        pass
+
+
 def split_name_for(family_id):
     return setup_flow.split_dirs_name(family_id) if family_id else ""
 
@@ -661,6 +694,45 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
               ).pack(side="left", fill="x", expand=True, padx=6)
     ttk.Button(cmd_row, text="Copy", command=lambda: (root.clipboard_clear(), root.clipboard_append(v_cmd.get()))
                ).pack(side="left")
+
+    # My models
+    t_lib = tab(" My models ")
+    ttk.Label(t_lib, text="Models already on this PC", style="Head.TLabel").pack(anchor="w")
+    ttk.Label(t_lib, style="Hint.TLabel", wraplength=1000, justify="left",
+              text="colibri's own models on every drive, and GGUF models from Ollama, LM Studio and the "
+                   "Hugging Face cache. A GGUF runs in colibri after Import (the file stays where it is) "
+                   "when its architecture is one colibri's engines serve; the others say why not."
+              ).pack(anchor="w")
+    lib_bar = ttk.Frame(t_lib)
+    lib_bar.pack(fill="x", pady=(8, 0))
+    ttk.Button(lib_bar, text="Scan again", command=lambda: scan_models()).pack(side="left")
+    ttk.Button(lib_bar, text="Add a folder to scan...", command=lambda: add_scan_folder()).pack(side="left", padx=6)
+    lib_status = ttk.Label(lib_bar, text="", style="Hint.TLabel")
+    lib_status.pack(side="left", padx=8)
+    lib = ttk.Treeview(t_lib, columns=("source", "size", "runs", "where"), show="tree headings",
+                       height=9, selectmode="browse")
+    lib.heading("#0", text="Model")
+    lib.column("#0", width=260)
+    for col, text, width_ in (("source", "From", 100), ("size", "Size", 80), ("runs", "In colibri", 150),
+                              ("where", "Where", 380)):
+        lib.heading(col, text=text)
+        lib.column(col, width=width_, anchor="w")
+    lib.tag_configure("no", foreground="#9aa0a6")
+    lib.tag_configure("current", font=(base_font[0], 10, "bold"))
+    lib.pack(fill="both", expand=True, pady=6)
+    lib_info = ttk.Label(t_lib, text="", wraplength=1000, justify="left")
+    lib_info.pack(anchor="w")
+    lib_btns = ttk.Frame(t_lib)
+    lib_btns.pack(fill="x", pady=(6, 0))
+    b_use = ttk.Button(lib_btns, text="Use this model", command=lambda: use_model())
+    b_use.pack(side="left")
+    b_import = ttk.Button(lib_btns, text="Import and use", command=lambda: import_model())
+    b_import.pack(side="left", padx=6)
+    b_move = ttk.Button(lib_btns, text="Move to another drive...", command=lambda: move_selected())
+    b_move.pack(side="left")
+    b_open = ttk.Button(lib_btns, text="Open folder", command=lambda: open_selected())
+    b_open.pack(side="left", padx=6)
+    lib_state = {"rows": [], "prefs": load_prefs()}
 
     # Connect apps
     t_apps = tab(" Connect apps ")
@@ -995,8 +1067,8 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         show_server()
         update_plan()
 
-    def launch(cmd, extra, kind):
-        if state["proc"]:
+    def launch(cmd, extra, kind, then=None):
+        if state["proc"] or state.get("moving"):
             messagebox.showinfo("colibri", "Something is already running: wait for it, or Cancel.")
             return
         log_write(f"\n> {display_command(cmd, extra)}\n")
@@ -1008,11 +1080,13 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
             show_output()
             return
         state["proc"] = proc
+        state["then"] = then
         busy(kind)
         progress.configure(mode="indeterminate")
         progress.start(12)
         v_status.set({"setup": "Installing...", "start": "Starting the server...",
-                      "stop": "Stopping the server..."}.get(kind, "Working..."))
+                      "stop": "Stopping the server...", "import": "Importing the GGUF...",
+                      "use": "Switching to the model..."}.get(kind, "Working..."))
         if kind == "show":
             show_output()
 
@@ -1049,6 +1123,10 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         launch(cmd, run_extra(), "setup")
 
     def cancel():
+        if state.get("moving"):
+            state["move_cancel"] = True
+            v_status.set("Cancelling the move...")
+            return
         proc = state["proc"]
         if proc and proc.poll() is None:
             if sys.platform == "win32":
@@ -1121,6 +1199,184 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         v_status.set(f"Codex bridge {'started' if started else 'already running'} on {conn['bridge']}.")
         root.after(3000, refresh_apps)
 
+    # My models
+    def scan_models():
+        lib_status.configure(text="Looking on every drive...")
+        folders = list(lib_state["prefs"].get("scan_folders") or [])
+        cfg = dict(state["cfg"] or {})
+
+        def work():
+            try:
+                rows = model_library.scan(folders, cfg=cfg)
+            except Exception as error:  # a scan never stops the window
+                traceback.print_exc(file=sys.stderr)
+                events.put(("error", f"The scan stopped: {error}"))
+                rows = []
+            events.put(("library", rows))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def add_scan_folder():
+        chosen = filedialog.askdirectory(title="A folder with models (GGUF files or colibri model folders)")
+        if not chosen:
+            return
+        folders = lib_state["prefs"].setdefault("scan_folders", [])
+        if os.path.normpath(chosen) not in folders:
+            folders.append(os.path.normpath(chosen))
+            save_prefs(lib_state["prefs"])
+        scan_models()
+
+    def current_model_dir():
+        return os.path.normcase(os.path.abspath((state["cfg"] or {}).get("model_dir") or "")) \
+            if (state["cfg"] or {}).get("model_dir") else ""
+
+    def fill_library():
+        keep = lib.selection()
+        lib.delete(*lib.get_children())
+        current = current_model_dir()
+        counts = {"yes": 0, "import": 0}
+        for index, r in enumerate(lib_state["rows"]):
+            is_current = current and os.path.normcase(os.path.abspath(r["path"])) == current
+            tags = ("current",) if is_current else (("no",) if r["runs"] == "no" else ())
+            counts[r["runs"]] = counts.get(r["runs"], 0) + 1
+            words = library_words(r["runs"])
+            if r["runs"] == "import" and os.path.isfile(os.path.join(model_library.import_target(
+                    r, v_root.get() or setup_flow.default_models_root()), "config.json")):
+                words = "Imported: Use it"
+            lib.insert("", "end", iid=str(index), tags=tags,
+                       text=r["name"] + ("   (in use)" if is_current else ""),
+                       values=(r["source"], setup_hw.fmt_gb(r["size"]) if r["size"] else "",
+                               words,
+                               os.path.dirname(r["path"]) if r["kind"] == "gguf" else r["path"]))
+        if not lib_state["rows"]:
+            lib.insert("", "end", iid="__none", tags=("no",), values=("", "", "", ""),
+                       text="No models found yet: install one (steps 1 to 4), or Add a folder to scan")
+        lib_status.configure(text=f"{len(lib_state['rows'])} found: {counts['yes']} ready, "
+                                  f"{counts['import']} to import")
+        if keep and lib.exists(keep[0]):
+            lib.selection_set(keep[0])
+        on_lib_select()
+
+    def lib_row():
+        sel = [s for s in lib.selection() if not s.startswith("__")]
+        return lib_state["rows"][int(sel[0])] if sel else None
+
+    def on_lib_select(_event=None):
+        r = lib_row()
+        busy_now = state["proc"] is not None or state.get("moving")
+        if not r:
+            lib_info.configure(text="Pick a model to use, import or move it.")
+            for button in (b_use, b_import, b_move, b_open):
+                button.configure(state="disabled")
+            return
+        text = f"{r['path']}\n{r['why']}"
+        if r["source"] == "Ollama" and r["runs"] == "import":
+            text += ("\nImport reads Ollama's own file, without copying it: keep the model in Ollama "
+                     "(after `ollama rm` it has to be imported again from another copy).")
+        lib_info.configure(text=text)
+        b_use.configure(state="normal" if r["runs"] in ("yes", "incomplete") and not busy_now else "disabled")
+        b_import.configure(state="normal" if r["runs"] == "import" and not busy_now else "disabled")
+        b_move.configure(state="normal" if r["kind"] == "folder" and not busy_now else "disabled")
+        b_open.configure(state="normal")
+
+    lib.bind("<<TreeviewSelect>>", on_lib_select)
+    lib.bind("<Double-1>", lambda _e: (use_model() if (lib_row() or {}).get("runs") in ("yes", "incomplete")
+                                       else import_model() if (lib_row() or {}).get("runs") == "import" else None))
+
+    def server_running():
+        return (state["server"] or {}).get("state") in ("ready", "loading")
+
+    def switch_to(row):
+        """`coli setup` for a folder already on disk; the running server is stopped first."""
+        cmd = model_library.use_command(row, python=py, coli=COLI, start=v_start.get() != "no")
+        if v_no_browser.get():
+            cmd.append("--no-browser")
+        if server_running():
+            launch([py, COLI, "stop"], {}, "stop", then=lambda: launch(cmd, {}, "use"))
+        else:
+            launch(cmd, {}, "use")
+
+    def use_model():
+        r = lib_row()
+        if not r:
+            return
+        is_current = current_model_dir() == os.path.normcase(os.path.abspath(r["path"]))
+        if is_current and state["ready"]:
+            if not server_running():
+                run_coli(["start", "--background"] + (["--no-browser"] if v_no_browser.get() else []), "start")
+            else:
+                v_status.set(f"{r['name']} is already in use.")
+            return
+        question = f"Use {r['name']} from now on?"
+        if server_running():
+            question += "\n\nThe running server is stopped first."
+        if r["runs"] == "incomplete":
+            question += "\n\nIts download is not finished: it continues first."
+        if messagebox.askyesno("colibri", question):
+            switch_to(r)
+
+    def import_model():
+        r = lib_row()
+        if not r or r["runs"] != "import":
+            return
+        root_dir = v_root.get() or setup_flow.default_models_root()
+        out = model_library.import_target(r, root_dir)
+        target = {"source": "colibri", "id": os.path.basename(out), "path": out, "repo": "", "name": r["name"]}
+        if os.path.isfile(os.path.join(out, "config.json")):
+            if messagebox.askyesno("colibri", f"{r['name']} was imported before ({out}). Use it now?"):
+                switch_to(target)
+            return
+        if not messagebox.askyesno(
+                "colibri", f"Import {r['name']} into colibri and use it?\n\n"
+                           f"A small folder is made in {out}; the weights are read from where they are now "
+                           f"({setup_hw.fmt_gb(r['size'])}, nothing is copied)."):
+            return
+        launch(model_library.import_command(r, out, python=py, coli=COLI), {}, "import",
+               then=lambda: switch_to(target))
+
+    def move_selected():
+        r = lib_row()
+        if not r or r["kind"] != "folder":
+            return
+        dest = filedialog.askdirectory(title=f"Move {r['name']} into which folder? (for example E:\\colibri-models)")
+        if not dest:
+            return
+        dest = os.path.normpath(dest)
+        in_use = server_running() and current_model_dir() == os.path.normcase(os.path.abspath(r["path"]))
+        problem = model_library.move_problem(r["path"], dest, size=r["size"], in_use=in_use)
+        if problem:
+            messagebox.showwarning("colibri", f"{r['name']} cannot move there: {problem}.")
+            return
+        quick = model_library.same_drive(r["path"], dest)
+        if not messagebox.askyesno(
+                "colibri", f"Move {r['name']} ({setup_hw.fmt_gb(r['size'])}) to {dest}?\n\n"
+                           + ("Same drive: this is instant." if quick else
+                              "Another drive: it is copied and checked, and only then removed from "
+                              f"{os.path.dirname(r['path'])}. Cancel at any time leaves it where it is.")):
+            return
+        state["moving"], state["move_cancel"] = True, False
+        busy("move")
+        progress.configure(mode="indeterminate")
+        progress.start(12)
+        v_status.set(f"Moving {r['name']}...")
+        on_lib_select()
+
+        def work():
+            try:
+                new = model_library.move_model(
+                    r["path"], dest, progress=lambda d, t: events.put(("move", (d, t))),
+                    cancelled=lambda: state.get("move_cancel", False))
+                events.put(("moved", (r["path"], new, None)))
+            except (model_library.MoveError, OSError) as error:
+                events.put(("moved", (r["path"], None, str(error))))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def open_selected():
+        r = lib_row()
+        if r:
+            open_path(r["path"] if r["kind"] == "folder" else os.path.dirname(r["path"]))
+
     # ---- the event loop's side
     def poll():
         try:
@@ -1133,17 +1389,48 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
                     state["proc"] = None
                     progress.stop()
                     progress.configure(mode="determinate", value=1000 if code == 0 else 0)
-                    if state.pop("cancelled", False):
+                    was_cancelled = state.pop("cancelled", False)
+                    then = state.pop("then", None)
+                    if was_cancelled:
                         v_status.set("Cancelled. Install again continues where it stopped.")
                     elif code == 0:
                         v_status.set({"setup": "Installed.", "start": "Started: the model is loading.",
-                                      "stop": "Stopped."}.get(what, "Done."))
+                                      "stop": "Stopped.", "import": "Imported.",
+                                      "use": "Switched: the model is loading."}.get(what, "Done."))
                     else:
                         v_status.set("It stopped with an error: the output below says why.")
                         show_output()
                     busy("")
                     load_current()
                     refresh_apps()
+                    if what in ("import", "use", "setup", "stop"):
+                        scan_models()
+                    if then and code == 0 and not was_cancelled:
+                        then()
+                elif kind == "library":
+                    lib_state["rows"] = payload
+                    fill_library()
+                elif kind == "move":
+                    done_bytes, total = payload
+                    progress.configure(mode="determinate", value=int(1000 * done_bytes / max(1, total)))
+                    v_status.set(f"Moving the model: {setup_hw.fmt_gb(done_bytes)} of {setup_hw.fmt_gb(total)}")
+                elif kind == "moved":
+                    old, new, error = payload
+                    state["moving"] = False
+                    progress.stop()
+                    progress.configure(mode="determinate", value=1000 if new else 0)
+                    busy("")
+                    if new:
+                        cfg = setup_flow.load_config() or {}
+                        moved = model_library.follow_move(cfg, old, new)
+                        if moved is not cfg:
+                            setup_flow.save_config(moved)
+                        v_status.set(f"Moved to {new}" + ("; the setup now uses it there." if moved is not cfg else "."))
+                    else:
+                        v_status.set(f"Not moved: {error}")
+                        messagebox.showwarning("colibri", f"The model was not moved:\n\n{error}")
+                    load_current()
+                    scan_models()
                 elif kind == "server":
                     cfg, ready, server = payload
                     changed = (cfg != state["cfg"] or ready != state["ready"]
@@ -1201,6 +1488,11 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
         root.after(250, poll)
 
     def on_close():
+        if state.get("moving"):
+            if not messagebox.askyesno("colibri", "A model is being moved. Stop the move and close?\n"
+                                                  "(The model stays in its old place.)"):
+                return
+            state["move_cancel"] = True
         proc = state["proc"]
         if proc and proc.poll() is None:
             if not messagebox.askyesno("colibri", "Something is still running. Stop it and close?\n"
@@ -1214,6 +1506,7 @@ def main():  # pragma: no cover - the window itself is exercised by hand and by 
     refresh_mode()
     detect()
     app_list.selection_set("claude")
+    scan_models()
     threading.Thread(target=watch_server, daemon=True).start()
     show_server()
     load_current()
